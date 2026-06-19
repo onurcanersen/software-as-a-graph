@@ -2,7 +2,6 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { useState } from "react"
 import { cn } from "@/lib/utils"
 import Image from "next/image"
 import {
@@ -80,22 +79,12 @@ const navigation = [
 
 export function Sidebar() {
   const pathname = usePathname()
-  const [collapsed, setCollapsed] = useState(true)
 
   return (
     <div
-      className={cn(
-        "relative flex h-full flex-col border-r bg-gradient-to-b from-slate-50 via-white to-slate-50 dark:from-slate-950 dark:via-background dark:to-slate-950 transition-all duration-300",
-        collapsed ? "w-16" : "w-64"
-      )}
-      onMouseEnter={() => setCollapsed(false)}
-      onMouseLeave={() => setCollapsed(true)}
+      className="relative flex h-full w-64 flex-col border-r bg-gradient-to-b from-slate-50 via-white to-slate-50 dark:from-slate-950 dark:via-background dark:to-slate-950"
     >
-      {/* Logo/Title */}
-      <div className={cn(
-        "flex h-16 items-center border-b bg-gradient-to-r from-cyan-50 to-blue-50 dark:from-cyan-950/30 dark:to-blue-950/30",
-        collapsed ? "justify-center px-0" : "px-6"
-      )}>
+      <div className="flex h-16 items-center border-b bg-gradient-to-r from-cyan-50 to-blue-50 dark:from-cyan-950/30 dark:to-blue-950/30 px-6">
         <Image
           src="/smart.png"
           alt="SMART Logo"
@@ -103,13 +92,10 @@ export function Sidebar() {
           height={32}
           className="rounded-lg shrink-0"
         />
-        {!collapsed && (
-          <span className="ml-3 text-lg font-bold bg-gradient-to-r from-cyan-500 to-blue-700 dark:from-cyan-400 dark:to-blue-500 bg-clip-text text-transparent whitespace-nowrap overflow-hidden">SMART</span>
-        )}
+        <span className="ml-3 text-lg font-bold bg-gradient-to-r from-cyan-500 to-blue-700 dark:from-cyan-400 dark:to-blue-500 bg-clip-text text-transparent whitespace-nowrap overflow-hidden">SMART</span>
       </div>
 
-      {/* Navigation */}
-      <nav className={cn("flex-1 space-y-1 p-2", !collapsed && "p-4")}>
+      <nav className="flex-1 space-y-1 p-4">
         {navigation.map((item) => {
           const isActive = pathname === item.href || pathname.startsWith(item.href + "/")
           const Icon = item.icon
@@ -118,18 +104,15 @@ export function Sidebar() {
             <Link
               key={item.name}
               href={item.href}
-              title={collapsed ? item.name : undefined}
-              onClick={() => setCollapsed(true)}
               className={cn(
-                "flex items-center rounded-lg px-3 py-2.5 text-sm font-medium transition-colors",
-                collapsed ? "justify-center gap-0" : "gap-3",
+                "flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors",
                 isActive
                   ? "bg-accent text-accent-foreground"
                   : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
               )}
             >
               <Icon className="h-5 w-5 shrink-0" />
-              {!collapsed && item.name}
+              {item.name}
             </Link>
           )
         })}
