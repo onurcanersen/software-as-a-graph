@@ -388,9 +388,9 @@ export default function DashboardPage() {
             </div>
           </div>
         ) : (
-          <div className="group flex items-center justify-between gap-4 rounded-xl border border-dashed border-border bg-muted/5 px-5 py-4">
+          <div className="group flex items-center justify-between gap-4 rounded-xl border-2 border-dashed border-border bg-muted/5 px-5 py-4">
             <div className="flex items-center gap-3 min-w-0">
-              <div className="shrink-0 rounded-lg bg-muted p-2">
+              <div className="shrink-0 rounded-lg border-2 border-border/40 bg-muted p-2">
                 <Activity className="h-5 w-5 text-muted-foreground" />
               </div>
               <div className="min-w-0">
@@ -468,12 +468,12 @@ export default function DashboardPage() {
 
         {/* ── Charts ────────────────────────────────────────────────── */}
         {isEmpty ? (
-          <div className="flex flex-col items-center justify-center gap-4 rounded-xl border border-dashed border-slate-700 bg-slate-900/30 py-20 px-8 text-center">
-            <div className="rounded-full border border-slate-700 bg-slate-800/60 p-5">
-              <Database className="h-9 w-9 text-slate-500" />
+          <div className="flex flex-col items-center justify-center gap-4 rounded-xl border-2 border-dashed border-border bg-muted/5 py-20 px-8 text-center">
+            <div className="rounded-full border-2 border-border/40 bg-muted p-5">
+              <Database className="h-9 w-9 text-muted-foreground" />
             </div>
             <div className="space-y-1">
-              <p className="font-semibold text-slate-300">No graph data yet</p>
+              <p className="font-semibold text-foreground">No graph data yet</p>
               <p className="text-sm text-muted-foreground max-w-sm">
                 Import or generate a system topology to see distribution charts and analytics.
               </p>
