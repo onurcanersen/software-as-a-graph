@@ -1583,8 +1583,8 @@ const ConnEChartsGraph = memo(function ConnEChartsGraph({ graphData, dims, isDar
     <div style={{ width: W, height: H, position: "relative" }}>
       {/* Legend */}
       <div style={{
-        position: "absolute", bottom: 10, left: 10, zIndex: 10,
-        display: "flex", flexWrap: "wrap", gap: "6px 12px",
+        position: "absolute", bottom: 10, left: 10, right: 10, zIndex: 10,
+        display: "flex", gap: "6px 12px",
         padding: "5px 10px",
         borderRadius: 8,
         background: isDark ? "rgba(15,15,20,0.70)" : "rgba(255,255,255,0.80)",
@@ -1593,9 +1593,10 @@ const ConnEChartsGraph = memo(function ConnEChartsGraph({ graphData, dims, isDar
         fontSize: 9,
         color: isDark ? "#94a3b8" : "#64748b",
         pointerEvents: "none",
+        overflowX: "auto",
       }}>
         {Object.keys(isDark ? CONN_LINK_TYPE_COLORS_DARK : CONN_LINK_TYPE_COLORS_LIGHT).map(type => (
-          <span key={type} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <span key={type} style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
             <span style={{ width: 18, height: 2, background: linkTypeColor(type, isDark), flexShrink: 0, borderRadius: 1 }} />
             {type}
           </span>
@@ -1606,6 +1607,7 @@ const ConnEChartsGraph = memo(function ConnEChartsGraph({ graphData, dims, isDar
         position: "absolute", top: 8, right: 8, zIndex: 10,
         fontSize: 10, color: isDark ? "#52525b" : "#a1a1aa",
         pointerEvents: "none",
+        whiteSpace: "nowrap",
       }}>
         Click groups to collapse · Scroll to zoom · Drag to pan
       </div>
@@ -2447,9 +2449,9 @@ const HierEChartsTree = memo(function HierEChartsTree({
     <div style={{ width: dims.width, height: dims.height, position: "relative" }}>
       {/* Legend */}
       <div style={{
-        position: "absolute", bottom: 10, left: 10, zIndex: 10,
-        display: "flex", flexDirection: "column", gap: "6px",
-        padding: "6px 10px",
+        position: "absolute", bottom: 10, left: 10, right: 10, zIndex: 10,
+        display: "flex", gap: "6px 12px", alignItems: "center",
+        padding: "5px 10px",
         borderRadius: 8,
         background: isDark ? "rgba(15,15,20,0.70)" : "rgba(255,255,255,0.80)",
         backdropFilter: "blur(8px)",
@@ -2457,22 +2459,22 @@ const HierEChartsTree = memo(function HierEChartsTree({
         fontSize: 10,
         color: isDark ? "#94a3b8" : "#64748b",
         pointerEvents: "auto",
+        overflowX: "auto",
       }}>
-        <span style={{ fontWeight: 600, marginBottom: 2, display: "block" }}>Legend</span>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 14px" }}>
-          {(["csms", "css", "csci", "csc", "app", "lib"] as const).map(lvl => (
-            <span key={lvl} style={{ display: "flex", alignItems: "center", gap: 5 }}>
-              <span style={{ width: 8, height: 8, borderRadius: "50%", background: NODE_COLORS[lvl], flexShrink: 0 }} />
-              {LEVEL_LABELS[lvl]}
-            </span>
-          ))}
-        </div>
+        <span style={{ fontWeight: 600, flexShrink: 0 }}>Legend</span>
+        {(["csms", "css", "csci", "csc", "app", "lib"] as const).map(lvl => (
+          <span key={lvl} style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: NODE_COLORS[lvl], flexShrink: 0 }} />
+            {LEVEL_LABELS[lvl]}
+          </span>
+        ))}
       </div>
       {/* Hint */}
       <div style={{
         position: "absolute", top: 8, right: 8, zIndex: 10,
         fontSize: 10, color: isDark ? "#52525b" : "#a1a1aa",
         pointerEvents: "none",
+        whiteSpace: "nowrap",
       }}>
         Click nodes to collapse · Scroll to zoom · Drag to pan
       </div>
@@ -3058,6 +3060,7 @@ function HierarchyGraph({ hierarchy, extraNodes = [], initialNodeId = null, sync
                 )
               })}
             </div>
+            <div className="w-px h-4 bg-border shrink-0" />
             <div className="flex items-center gap-1.5">
               <span className="text-xs text-muted-foreground mr-1 font-medium">Nodes:</span>
               {(Object.entries(CONN_NODE_TYPE_COLORS_DARK) as [string, string][]).map(([t, color]) => (
@@ -3075,6 +3078,7 @@ function HierarchyGraph({ hierarchy, extraNodes = [], initialNodeId = null, sync
                 </span>
               ))}
             </div>
+            <div className="w-px h-4 bg-border shrink-0" />
             <div className="flex items-center gap-1.5">
               <span className="text-xs text-muted-foreground mr-1 font-medium">Edges:</span>
               {(Object.entries(CONN_LINK_TYPE_COLORS_DARK) as [string, string][])
@@ -3899,9 +3903,9 @@ const GraphOverviewEChart = memo(function GraphOverviewEChart({
   return (
     <div className="flex flex-col h-full" style={{ background: bg }}>
       {/* Toolbar */}
-      <div className="flex items-center gap-3 px-3 py-2 shrink-0 flex-wrap">
+      <div className="flex items-center gap-3 px-3 py-2 shrink-0 overflow-x-auto [&_*]:shrink-0">
         {/* Node type legend */}
-        <div className="flex items-center gap-1.5 flex-wrap">
+        <div className="flex items-center gap-1.5">
           <span className="text-xs text-muted-foreground mr-1">Nodes:</span>
           {OVERVIEW_TYPES.map(t => (
             <button
@@ -3921,9 +3925,10 @@ const GraphOverviewEChart = memo(function GraphOverviewEChart({
             </button>
           ))}
         </div>
+        <div className="w-px h-4 bg-border shrink-0" />
 
         {/* Edge type legend — always rendered so buttons don't disappear when all are toggled off */}
-        <div className="flex items-center gap-1.5 flex-wrap">
+        <div className="flex items-center gap-1.5">
           <span className="text-xs text-muted-foreground mr-1">Edges:</span>
           {edgeTypes.map(t => (
             <button
@@ -3942,6 +3947,7 @@ const GraphOverviewEChart = memo(function GraphOverviewEChart({
             </button>
           ))}
         </div>
+        <div className="w-px h-4 bg-border shrink-0" />
 
         {/* Layout toggle + Stats */}
         <div className="ml-auto flex items-center gap-3 text-xs text-muted-foreground">
@@ -3955,7 +3961,7 @@ const GraphOverviewEChart = memo(function GraphOverviewEChart({
           >
             {layoutMode === "clustered" ? "Clustered" : "Scattered"}
           </button>
-          <span className="hidden sm:inline opacity-60">Scroll to zoom · drag to pan</span>
+          <span className="hidden sm:inline opacity-60 whitespace-nowrap">Scroll to zoom · drag to pan</span>
         </div>
       </div>
 
