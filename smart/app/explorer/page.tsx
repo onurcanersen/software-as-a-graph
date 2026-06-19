@@ -1,7 +1,7 @@
 "use client"
 
 import React, { useState, useEffect, useCallback, useMemo, useRef, memo, Suspense, useDeferredValue } from "react"
-import { useSearchParams } from "next/navigation"
+import { useSearchParams, useRouter } from "next/navigation"
 import dynamic from "next/dynamic"
 import { useTheme } from "next-themes"
 import { AppLayout } from "@/components/layout/app-layout"
@@ -36,6 +36,7 @@ import {
   Download,
   Eye,
   EyeOff,
+  Database,
 } from "lucide-react"
 
 const ReactECharts = dynamic(() => import("echarts-for-react"), { ssr: false })
@@ -136,7 +137,7 @@ const NODE_SIZES: Record<HGLevel, number> = {
   csms: 14, css: 10, csci: 8, csc: 6, app: 3.5, lib: 3.5,
 }
 const LEVEL_LABELS: Record<HGLevel, string> = {
-  csms: "System (CSMS)", css: "Segment (CSS)", csci: "Config Item (CSCI)", csc: "Component (CSC)", app: "App (CSU)", lib: "Library",
+  csms: "System (CSMS)", css: "Segment (CSS)", csci: "Config Item (CSCI)", csc: "Component (CSC)", app: "Application (CSU)", lib: "Library",
 }
 
 // Hierarchical connections-view layout: assign a y-layer per node type
@@ -1928,13 +1929,11 @@ function buildConnSubtree(
           _raw: node,
           _isConnLeaf: true,
           _dir: dir,
-          collapsed: !leafData,
           symbol: "circle",
           symbolSize: 10,
           itemStyle: { color: nc, borderWidth: leafData ? 1.5 : 0, ...(leafData ? { borderColor: isDark ? "#e5e7eb" : "#374151" } : {}) },
           lineStyle: { color: ec + "88" },
           label: { fontSize: 11, color: isDark ? "#a1a1aa" : "#6b7280" },
-          ...(leafData ? { children: buildConnSubtree(node.id, leafData, expandedLeaves, isDark, instanceKey) } : {}),
         }
       }),
     }
@@ -2063,7 +2062,7 @@ function buildMergedTree(
 }
 
 const MergedEChartsTree = memo(function MergedEChartsTree({
-  hierarchy, connDataMap, expandedLeaves, selectedApp, dims, isDark, focusHierPathKey, onAppNodeClick, onConnNodeClick, exportFnRef,
+  hierarchy, connDataMap, expandedLeaves, selectedApp, dims, isDark, focusHierPathKey, onAppNodeClick, exportFnRef,
 }: {
   hierarchy: Record<string, CsmsGroup>
   connDataMap: Map<string, { nodes: any[]; links: any[] }>
@@ -2073,7 +2072,6 @@ const MergedEChartsTree = memo(function MergedEChartsTree({
   isDark: boolean
   focusHierPathKey?: string | null
   onAppNodeClick: (app: AppNode, instanceKey: string) => void
-  onConnNodeClick: (nodeId: string, instanceKey: string) => void
   exportFnRef?: React.MutableRefObject<(() => void) | null>
 }) {
   const W = dims.width || 800
@@ -2296,21 +2294,14 @@ const MergedEChartsTree = memo(function MergedEChartsTree({
     click: (params: any) => {
       const d = params.data
       if (!d) return
-      if (d._isConnLeaf) {
-        const rawKey: string = (d.name as string).includes('\x00') ? (d.name as string).split('\x00')[1] : `cl:${d.value}`
-        // strip the "cl:" prefix that was added for ECharts node uniqueness
-        const instanceKey = rawKey.startsWith('cl:') ? rawKey.slice(3) : rawKey
-        onConnNodeClick(String(d.value ?? ''), instanceKey)
-        return
-      }
-      if (d._isConnGroup) return
+      if (d._isConnLeaf || d._isConnGroup) return
       if (d._app) {
         const instanceKey: string = (d.name as string).includes('\x00') ? (d.name as string).split('\x00')[1] : `${d._level === "lib" ? "lib" : "app"}:${d._app.id}`
         onAppNodeClick(d._app, instanceKey)
         return
       }
     },
-  }), [onAppNodeClick, onConnNodeClick])
+  }), [onAppNodeClick])
 
   return (
     <div style={{ width: W, height: H, position: "relative" }}>
@@ -2864,43 +2855,6 @@ function HierarchyGraph({ hierarchy, extraNodes = [], initialNodeId = null, sync
     onNodeSelect?.(key)
   }, [selectedApp, onNodeSelect])
 
-  const onConnLeafClick = useCallback((nodeId: string, instanceKey: string) => {
-    // Update right panel to show the clicked node
-    const existingData = connDataMap.get(nodeId)
-    // Use a "conn:" prefixed instanceKey so the hierarchy tree never highlights/expands this node
-    const connInstanceKey = `conn:${nodeId}`
-    const extraNode = extraNodes.find((n: any) => n.id === nodeId)
-    const nodeName = extraNode?.name ?? extraNode?.label ?? nodeId
-    const nodeType = extraNode?.type
-    const hgNode: HGNode = { id: `${nodeType === "Library" ? "lib" : "app"}:${nodeId}`, name: nodeName, level: nodeType === "Library" ? "lib" : "app", appCount: 1, pathKey: nodeId, instanceKey: connInstanceKey, nodeType }
-    setSelectedApp(hgNode)
-    setConnTab("props")
-    if (existingData) setConnData(existingData)
-
-    // Notify parent so side panel and list view stay in sync
-    onSelectInfo?.(nodeId, nodeName, nodeType)
-
-    // Toggle expansion
-    if (expandedLeaves.has(instanceKey)) {
-      setExpandedLeaves(prev => { const next = new Map(prev); next.delete(instanceKey); return next })
-      return
-    }
-    apiClient.getNodeConnectionsWithDepth(nodeId, true, 1)
-      .then(structural => {
-        setExpandedLeaves(prev => new Map(prev).set(instanceKey, { nodes: structural.nodes, links: structural.links }))
-        setConnDataMap(prev => new Map(prev).set(nodeId, { nodes: structural.nodes, links: structural.links }))
-        setConnData({ nodes: structural.nodes, links: structural.links })
-        // Update name/type from fetched data and re-notify parent side panel
-        const fetchedNode = structural.nodes.find((n: any) => n.id === nodeId)
-        if (fetchedNode) {
-          const fetchedName = (fetchedNode as any).label ?? (fetchedNode as any).name ?? nodeId
-          const fetchedType = (fetchedNode as any).type
-          setSelectedApp({ id: `${fetchedType === "Library" ? "lib" : "app"}:${nodeId}`, name: fetchedName, level: fetchedType === "Library" ? "lib" : "app", nodeType: fetchedType, appCount: 1, pathKey: nodeId, instanceKey: connInstanceKey })
-          onSelectInfo?.(nodeId, fetchedName, fetchedType)
-        }
-      }).catch(() => {})
-  }, [expandedLeaves, connDataMap, extraNodes, onNodeSelect, onSelectInfo])
-
   const drillTo = useCallback((idx: number) => {
     clearSelection()
     if (idx < 0) { setDrillNode(null); setDrillStack([]); return }
@@ -3037,7 +2991,6 @@ function HierarchyGraph({ hierarchy, extraNodes = [], initialNodeId = null, sync
               onNodeSelect?.(hgNode.id)
               onSelectInfo?.(hgNode.pathKey, hgNode.name, hgNode.nodeType)
             }}
-            onConnNodeClick={onConnLeafClick}
             exportFnRef={exportFnRef}
           />
 
@@ -3084,7 +3037,7 @@ function HierarchyGraph({ hierarchy, extraNodes = [], initialNodeId = null, sync
           </div>
 
           {/* Unified Legend — single horizontal line (static, no toggling) */}
-          <div className="absolute top-2 left-3 right-3 z-10 flex items-center gap-3 text-xs overflow-x-auto pointer-events-none shrink-0 select-none">
+          <div className="absolute top-2 left-3 right-3 z-10 flex items-center gap-3 text-xs overflow-x-auto pointer-events-auto shrink-0 select-text">
             <div className="flex items-center gap-1.5">
               <span className="text-xs text-muted-foreground mr-1 font-medium">Levels:</span>
               {(["csms", "css", "csci", "csc", "app", "lib"] as const).map(lvl => {
@@ -3421,17 +3374,22 @@ function EmptyDetailState() {
 }
 
 function EmptyExplorerState() {
+  const router = useRouter()
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-3 p-8 text-center">
-      <div className="h-12 w-12 rounded-full bg-muted flex items-center justify-center">
-        <Layers className="h-5 w-5 text-muted-foreground" />
+    <div className="flex flex-col items-center justify-center gap-4 rounded-xl border-2 border-dashed border-border bg-muted/5 py-20 px-8 text-center">
+      <div className="rounded-full border-2 border-border/40 bg-muted p-5">
+        <Database className="h-9 w-9 text-muted-foreground" />
       </div>
       <div className="space-y-1">
-        <p className="text-sm font-medium text-foreground">No data available</p>
-        <p className="text-xs text-muted-foreground max-w-64">
-          There are no components, applications, or topics currently loaded. Please import a graph to explore the system architecture.
+        <p className="font-semibold text-foreground">No graph data yet</p>
+        <p className="text-sm text-muted-foreground max-w-sm">
+          Import or generate a system topology to explore the system architecture.
         </p>
       </div>
+      <Button onClick={() => router.push('/data')} variant="outline" className="mt-1">
+        <Database className="mr-2 h-4 w-4" />
+        Import Data
+      </Button>
     </div>
   )
 }
@@ -4598,7 +4556,7 @@ const ForceGraphEChart = memo(function ForceGraphEChart({
           <>
             {nodeTypesInView.length > 0 && <div className="w-px h-4 bg-border shrink-0" />}
             <div className="flex items-center gap-1.5">
-              <span className="text-xs text-muted-foreground mr-1 font-medium">Relationships:</span>
+              <span className="text-xs text-muted-foreground mr-1 font-medium">Edges:</span>
               {edgeTypesInView.map(t => {
                 const hidden = hiddenEdgeTypes.has(t)
                 const color = EDGE_COLORS[t] ?? EDGE_COLOR_FALLBACK
@@ -5075,6 +5033,11 @@ function BrowserPageContent() {
   const q = search.toLowerCase()
   const csmsKeys = sortKeys(Object.keys(hierarchy))
 
+  const hasGraphDataForActiveTab =
+    (activeTab === "graph" && csmsKeys.length > 0) ||
+    (activeTab === "overview" && (appsList.length > 0 || nodesList.length > 0 || topicsList.length > 0 || libsList.length > 0 || brokersList.length > 0)) ||
+    (activeTab === "forcegraph" && (appsList.length > 0 || nodesList.length > 0 || topicsList.length > 0))
+
   return (
     <AppLayout
       title="Explorer"
@@ -5104,7 +5067,7 @@ function BrowserPageContent() {
               </TabsTrigger>
             </TabsList>
 
-            {(activeTab === "forcegraph" || activeTab === "graph" || activeTab === "overview") && (
+            {(activeTab === "forcegraph" || activeTab === "graph" || activeTab === "overview") && hasGraphDataForActiveTab && (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
