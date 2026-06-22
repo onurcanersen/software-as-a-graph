@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import { AppLayout } from "@/components/layout/app-layout"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -27,6 +27,7 @@ import {
   Clock,
   Terminal,
   ChevronDown,
+  XCircle,
 } from "lucide-react"
 import { useConnection } from "@/lib/stores/connection-store"
 import { apiClient } from "@/lib/api/client"
@@ -79,6 +80,14 @@ export default function DataPage() {
   const [importResult, setImportResult] = useState<any | null>(null)
   const [importLogsOpen, setImportLogsOpen] = useState(false)
 
+  const generateAbortRef = useRef<AbortController | null>(null)
+  const importAbortRef = useRef<AbortController | null>(null)
+  const downloadAbortRef = useRef<AbortController | null>(null)
+  const downloadNeo4jAbortRef = useRef<AbortController | null>(null)
+  const clearAbortRef = useRef<AbortController | null>(null)
+
+  const isAnyOperationRunning = isGenerating || isImporting || isDownloading || isDownloadingNeo4j || isClearing
+
   const isConnected = status === 'connected'
 
   // Track elapsed time during generation
@@ -105,8 +114,18 @@ export default function DataPage() {
     }
   }, [isImporting, importStartTime])
 
+  const handleCancel = () => {
+    generateAbortRef.current?.abort()
+    importAbortRef.current?.abort()
+    downloadAbortRef.current?.abort()
+    downloadNeo4jAbortRef.current?.abort()
+    clearAbortRef.current?.abort()
+  }
+
   const handleGenerate = async () => {
     if (!isConnected) return
+
+    generateAbortRef.current = new AbortController()
 
     setIsGenerating(true)
     setStartTime(Date.now())
@@ -120,7 +139,7 @@ export default function DataPage() {
         scale,
         seed: 42,
         clear_first: clearFirst
-      })
+      }, generateAbortRef.current.signal)
 
       setGenerateResult(result)
       setSuccess('Graph generated and imported successfully!')
@@ -130,22 +149,27 @@ export default function DataPage() {
         window.location.reload()
       }, 2000)
     } catch (error: any) {
-      let errorMsg = 'Generation failed'
-      if (error.response?.data?.detail) {
-        if (typeof error.response.data.detail === 'string') {
-          errorMsg = error.response.data.detail
-        } else if (Array.isArray(error.response.data.detail)) {
-          errorMsg = error.response.data.detail.map((e: any) => e.msg || JSON.stringify(e)).join(', ')
-        } else {
-          errorMsg = JSON.stringify(error.response.data.detail)
+      if (error?.name === 'CanceledError' || error?.code === 'ERR_CANCELED') {
+        setError('Generation was cancelled')
+      } else {
+        let errorMsg = 'Generation failed'
+        if (error.response?.data?.detail) {
+          if (typeof error.response.data.detail === 'string') {
+            errorMsg = error.response.data.detail
+          } else if (Array.isArray(error.response.data.detail)) {
+            errorMsg = error.response.data.detail.map((e: any) => e.msg || JSON.stringify(e)).join(', ')
+          } else {
+            errorMsg = JSON.stringify(error.response.data.detail)
+          }
+        } else if (error.message) {
+          errorMsg = error.message
         }
-      } else if (error.message) {
-        errorMsg = error.message
+        setError(errorMsg)
       }
-      setError(errorMsg)
     } finally {
       setIsGenerating(false)
       setStartTime(null)
+      generateAbortRef.current = null
     }
   }
 
@@ -155,33 +179,40 @@ export default function DataPage() {
       return
     }
 
+    clearAbortRef.current = new AbortController()
+
     setIsClearing(true)
     setError(null)
     setSuccess(null)
 
     try {
-      await apiClient.clearDatabase()
+      await apiClient.clearDatabase(clearAbortRef.current.signal)
       setSuccess('Database cleared successfully')
 
       setTimeout(() => {
         window.location.reload()
       }, 1500)
     } catch (error: any) {
-      let errorMsg = 'Clear operation failed'
-      if (error.response?.data?.detail) {
-        if (typeof error.response.data.detail === 'string') {
-          errorMsg = error.response.data.detail
-        } else if (Array.isArray(error.response.data.detail)) {
-          errorMsg = error.response.data.detail.map((e: any) => e.msg || JSON.stringify(e)).join(', ')
-        } else {
-          errorMsg = JSON.stringify(error.response.data.detail)
+      if (error?.name === 'CanceledError' || error?.code === 'ERR_CANCELED') {
+        setError('Clear operation was cancelled')
+      } else {
+        let errorMsg = 'Clear operation failed'
+        if (error.response?.data?.detail) {
+          if (typeof error.response.data.detail === 'string') {
+            errorMsg = error.response.data.detail
+          } else if (Array.isArray(error.response.data.detail)) {
+            errorMsg = error.response.data.detail.map((e: any) => e.msg || JSON.stringify(e)).join(', ')
+          } else {
+            errorMsg = JSON.stringify(error.response.data.detail)
+          }
+        } else if (error.message) {
+          errorMsg = error.message
         }
-      } else if (error.message) {
-        errorMsg = error.message
+        setError(errorMsg)
       }
-      setError(errorMsg)
     } finally {
       setIsClearing(false)
+      clearAbortRef.current = null
     }
   }
 
@@ -189,6 +220,8 @@ export default function DataPage() {
     if (!isConnected) return
     const file = event.target.files?.[0]
     if (!file) return
+
+    importAbortRef.current = new AbortController()
 
     setIsImporting(true)
     setImportStartTime(Date.now())
@@ -203,7 +236,7 @@ export default function DataPage() {
       
       const result = await apiClient.importGraph(graphData, {
         clear_first: clearFirst
-      })
+      }, importAbortRef.current.signal)
 
       setImportResult(result)
       setSuccess('Graph imported successfully!')
@@ -213,28 +246,35 @@ export default function DataPage() {
         window.location.reload()
       }, 2000)
     } catch (error: any) {
-      let errorMsg = 'Import failed'
-      if (error.response?.data?.detail) {
-        if (typeof error.response.data.detail === 'string') {
-          errorMsg = error.response.data.detail
-        } else if (Array.isArray(error.response.data.detail)) {
-          errorMsg = error.response.data.detail.map((e: any) => e.msg || JSON.stringify(e)).join(', ')
-        } else {
-          errorMsg = JSON.stringify(error.response.data.detail)
+      if (error?.name === 'CanceledError' || error?.code === 'ERR_CANCELED') {
+        setError('Import was cancelled')
+      } else {
+        let errorMsg = 'Import failed'
+        if (error.response?.data?.detail) {
+          if (typeof error.response.data.detail === 'string') {
+            errorMsg = error.response.data.detail
+          } else if (Array.isArray(error.response.data.detail)) {
+            errorMsg = error.response.data.detail.map((e: any) => e.msg || JSON.stringify(e)).join(', ')
+          } else {
+            errorMsg = JSON.stringify(error.response.data.detail)
+          }
+        } else if (error.message) {
+          errorMsg = error.message
         }
-      } else if (error.message) {
-        errorMsg = error.message
+        setError(errorMsg)
       }
-      setError(errorMsg)
     } finally {
       setIsImporting(false)
       setImportStartTime(null)
+      importAbortRef.current = null
       // Reset file input
       event.target.value = ''
     }
   }
 
   const handleDownloadGraph = async () => {
+    downloadAbortRef.current = new AbortController()
+
     setIsDownloading(true)
     setError(null)
     setSuccess(null)
@@ -244,7 +284,7 @@ export default function DataPage() {
         scale,
         scenario: 'generic',
         seed: 42
-      })
+      }, downloadAbortRef.current.signal)
 
       // Extract filename from response or create default
       const filename = `graph_${scale}.json`
@@ -267,52 +307,59 @@ export default function DataPage() {
 
       setSuccess(`Graph file downloaded: ${filename}`)
     } catch (error: any) {
-      let errorMsg = 'Download failed'
+      if (error?.name === 'CanceledError' || error?.code === 'ERR_CANCELED') {
+        setError('Download was cancelled')
+      } else {
+        let errorMsg = 'Download failed'
       
-      // Handle blob error responses
-      if (error.response?.data instanceof Blob) {
-        try {
-          const text = await error.response.data.text()
-          const errorData = JSON.parse(text)
-          if (errorData.detail) {
-            if (typeof errorData.detail === 'string') {
-              errorMsg = errorData.detail
-            } else if (Array.isArray(errorData.detail)) {
-              errorMsg = errorData.detail.map((e: any) => e.msg || JSON.stringify(e)).join(', ')
-            } else {
-              errorMsg = JSON.stringify(errorData.detail)
+        // Handle blob error responses
+        if (error.response?.data instanceof Blob) {
+          try {
+            const text = await error.response.data.text()
+            const errorData = JSON.parse(text)
+            if (errorData.detail) {
+              if (typeof errorData.detail === 'string') {
+                errorMsg = errorData.detail
+              } else if (Array.isArray(errorData.detail)) {
+                errorMsg = errorData.detail.map((e: any) => e.msg || JSON.stringify(e)).join(', ')
+              } else {
+                errorMsg = JSON.stringify(errorData.detail)
+              }
             }
+          } catch {
+            errorMsg = 'Failed to download graph file'
           }
-        } catch {
-          errorMsg = 'Failed to download graph file'
+        } else if (error.response?.data?.detail) {
+          if (typeof error.response.data.detail === 'string') {
+            errorMsg = error.response.data.detail
+          } else if (Array.isArray(error.response.data.detail)) {
+            errorMsg = error.response.data.detail.map((e: any) => e.msg || JSON.stringify(e)).join(', ')
+          } else {
+            errorMsg = JSON.stringify(error.response.data.detail)
+          }
+        } else if (error.message) {
+          errorMsg = error.message
         }
-      } else if (error.response?.data?.detail) {
-        if (typeof error.response.data.detail === 'string') {
-          errorMsg = error.response.data.detail
-        } else if (Array.isArray(error.response.data.detail)) {
-          errorMsg = error.response.data.detail.map((e: any) => e.msg || JSON.stringify(e)).join(', ')
-        } else {
-          errorMsg = JSON.stringify(error.response.data.detail)
-        }
-      } else if (error.message) {
-        errorMsg = error.message
-      }
       
-      setError(errorMsg)
+        setError(errorMsg)
+      }
     } finally {
       setIsDownloading(false)
+      downloadAbortRef.current = null
     }
   }
 
   const handleDownloadNeo4jData = async () => {
     if (!isConnected) return
 
+    downloadNeo4jAbortRef.current = new AbortController()
+
     setIsDownloadingNeo4j(true)
     setError(null)
     setSuccess(null)
 
     try {
-      const blob = await apiClient.exportNeo4jData()
+      const blob = await apiClient.exportNeo4jData(downloadNeo4jAbortRef.current.signal)
 
       // Create filename with timestamp
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)
@@ -336,40 +383,45 @@ export default function DataPage() {
 
       setSuccess(`Neo4j data exported: ${filename}`)
     } catch (error: any) {
-      let errorMsg = 'Export failed'
+      if (error?.name === 'CanceledError' || error?.code === 'ERR_CANCELED') {
+        setError('Export was cancelled')
+      } else {
+        let errorMsg = 'Export failed'
       
-      // Handle blob error responses
-      if (error.response?.data instanceof Blob) {
-        try {
-          const text = await error.response.data.text()
-          const errorData = JSON.parse(text)
-          if (errorData.detail) {
-            if (typeof errorData.detail === 'string') {
-              errorMsg = errorData.detail
-            } else if (Array.isArray(errorData.detail)) {
-              errorMsg = errorData.detail.map((e: any) => e.msg || JSON.stringify(e)).join(', ')
-            } else {
-              errorMsg = JSON.stringify(errorData.detail)
+        // Handle blob error responses
+        if (error.response?.data instanceof Blob) {
+          try {
+            const text = await error.response.data.text()
+            const errorData = JSON.parse(text)
+            if (errorData.detail) {
+              if (typeof errorData.detail === 'string') {
+                errorMsg = errorData.detail
+              } else if (Array.isArray(errorData.detail)) {
+                errorMsg = errorData.detail.map((e: any) => e.msg || JSON.stringify(e)).join(', ')
+              } else {
+                errorMsg = JSON.stringify(errorData.detail)
+              }
             }
+          } catch {
+            errorMsg = 'Failed to export Neo4j data'
           }
-        } catch {
-          errorMsg = 'Failed to export Neo4j data'
+        } else if (error.response?.data?.detail) {
+          if (typeof error.response.data.detail === 'string') {
+            errorMsg = error.response.data.detail
+          } else if (Array.isArray(error.response.data.detail)) {
+            errorMsg = error.response.data.detail.map((e: any) => e.msg || JSON.stringify(e)).join(', ')
+          } else {
+            errorMsg = JSON.stringify(error.response.data.detail)
+          }
+        } else if (error.message) {
+          errorMsg = error.message
         }
-      } else if (error.response?.data?.detail) {
-        if (typeof error.response.data.detail === 'string') {
-          errorMsg = error.response.data.detail
-        } else if (Array.isArray(error.response.data.detail)) {
-          errorMsg = error.response.data.detail.map((e: any) => e.msg || JSON.stringify(e)).join(', ')
-        } else {
-          errorMsg = JSON.stringify(error.response.data.detail)
-        }
-      } else if (error.message) {
-        errorMsg = error.message
-      }
       
-      setError(errorMsg)
+        setError(errorMsg)
+      }
     } finally {
       setIsDownloadingNeo4j(false)
+      downloadNeo4jAbortRef.current = null
     }
   }
 
@@ -512,6 +564,14 @@ export default function DataPage() {
                   <div className="w-32 ml-1">
                     <Progress value={progressValue} className="h-1.5" />
                   </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleCancel}
+                    className="ml-2 h-7 px-2.5 text-xs text-red-400 hover:text-red-300 hover:bg-red-500/10 border border-red-500/30"
+                  >
+                    <XCircle className="mr-1.5 h-3 w-3" />Cancel
+                  </Button>
                 </div>
               </div>
               <div className="space-y-1 pl-1">
@@ -606,6 +666,14 @@ export default function DataPage() {
                   <div className="w-32 ml-1">
                     <Progress value={progressValue} className="h-1.5" />
                   </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleCancel}
+                    className="ml-2 h-7 px-2.5 text-xs text-red-400 hover:text-red-300 hover:bg-red-500/10 border border-red-500/30"
+                  >
+                    <XCircle className="mr-1.5 h-3 w-3" />Cancel
+                  </Button>
                 </div>
               </div>
               <div className="space-y-1 pl-1">

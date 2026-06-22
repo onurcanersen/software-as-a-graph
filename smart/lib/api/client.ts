@@ -32,8 +32,11 @@ class GraphAnalysisAPI {
     this.client.interceptors.response.use(
       (response) => response,
       (error) => {
-        // Check if it's a network error or server unavailable
-        if (!error.response || error.code === 'ECONNABORTED' || error.code === 'ERR_NETWORK') {
+        if (
+          (!error.response || error.code === 'ECONNABORTED' || error.code === 'ERR_NETWORK') &&
+          error.code !== 'ERR_CANCELED' &&
+          error.name !== 'CanceledError'
+        ) {
           // Notify connection error callback
           if (this.onConnectionError) {
             this.onConnectionError();
@@ -596,12 +599,12 @@ class GraphAnalysisAPI {
     return response.data;
   }
 
-  async analyzeByLayer(layer: string): Promise<any> {
+  async analyzeByLayer(layer: string, signal?: AbortSignal): Promise<any> {
     if (!this.credentials) {
       throw new Error('No credentials set. Please connect first.');
     }
     
-    const response = await this.client.post(`/api/v1/analysis/layer/${layer}`, this.credentials);
+    const response = await this.client.post(`/api/v1/analysis/layer/${layer}`, this.credentials, { signal });
     return response.data;
   }
 
@@ -1080,7 +1083,7 @@ class GraphAnalysisAPI {
 
   async importGraph(graphData: any, params?: {
     clear_first?: boolean;
-  }) {
+  }, signal?: AbortSignal) {
     if (!this.credentials) {
       throw new Error('No credentials set. Please connect first.');
     }
@@ -1090,7 +1093,7 @@ class GraphAnalysisAPI {
       credentials: this.credentials,
       graph_data: graphData,
       clear_database: params?.clear_first || false
-    });
+    }, { signal });
     
     return response.data;
   }
@@ -1107,7 +1110,7 @@ class GraphAnalysisAPI {
     batch_size?: number;
     clear_first?: boolean;
     derive_dependencies?: boolean;
-  }) {
+  }, signal?: AbortSignal) {
     if (!this.credentials) {
       throw new Error('No credentials set. Please connect first.');
     }
@@ -1118,7 +1121,8 @@ class GraphAnalysisAPI {
         scale: request.scale,
         seed: request.seed || 42,
         clear_database: request.clear_first || false
-      }
+      },
+      signal
     });
     
     return response.data;
@@ -1133,7 +1137,7 @@ class GraphAnalysisAPI {
     num_brokers?: number;
     antipatterns?: string[];
     seed?: number;
-  }): Promise<Blob> {
+  }, signal?: AbortSignal): Promise<Blob> {
     // Build request body with only defined values
     const requestBody: any = {
       scale: request.scale,
@@ -1149,7 +1153,7 @@ class GraphAnalysisAPI {
     if (request.num_brokers !== undefined) requestBody.num_brokers = request.num_brokers;
 
     // Use the generate-file endpoint that doesn't require credentials
-    const response = await this.client.post('/api/v1/graph/generate-file', requestBody);
+    const response = await this.client.post('/api/v1/graph/generate-file', requestBody, { signal });
     
     // Extract graph_data from the response
     const graphData = response.data.graph_data;
@@ -1163,23 +1167,23 @@ class GraphAnalysisAPI {
     return blob;
   }
 
-  async clearDatabase() {
+  async clearDatabase(signal?: AbortSignal) {
     if (!this.credentials) {
       throw new Error('No credentials set. Please connect first.');
     }
     
     // Use POST instead of DELETE to avoid CORS issues
-    const response = await this.client.post('/api/v1/graph/clear', this.credentials);
+    const response = await this.client.post('/api/v1/graph/clear', this.credentials, { signal });
     return response.data;
   }
 
-  async exportNeo4jData(): Promise<Blob> {
+  async exportNeo4jData(signal?: AbortSignal): Promise<Blob> {
     if (!this.credentials) {
       throw new Error('No credentials set. Please connect first.');
     }
     
     // Call the export endpoint that returns data in input file format
-    const response = await this.client.post('/api/v1/graph/export-neo4j-data', this.credentials);
+    const response = await this.client.post('/api/v1/graph/export-neo4j-data', this.credentials, { signal });
     
     // Extract graph_data from the response
     const graphData = response.data.graph_data;

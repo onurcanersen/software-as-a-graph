@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useState, useEffect, useMemo } from "react"
+import React, { useState, useEffect, useMemo, useRef } from "react"
 import { useRouter } from "next/navigation"
 import { AppLayout } from "@/components/layout/app-layout"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -139,6 +139,8 @@ export default function AnalysisPage() {
   // Analysis log panel state
   const [logsOpen, setLogsOpen] = useState(false)
 
+  const analyzeAbortRef = useRef<AbortController | null>(null)
+
   // Track dark mode so charts re-render on theme switch
   const [isDark, setIsDark] = useState(() =>
     typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
@@ -234,9 +236,15 @@ export default function AnalysisPage() {
     }
   }, [isLoading, startTime])
 
+  const handleCancel = () => {
+    analyzeAbortRef.current?.abort()
+  }
+
   // Handle analysis based on selected mode
   const handleAnalyze = async () => {
     if (!isConnected || isLoading) return // Prevent multiple simultaneous calls
+
+    analyzeAbortRef.current = new AbortController()
 
     setIsLoading(true)
     setStartTime(Date.now())
@@ -244,7 +252,7 @@ export default function AnalysisPage() {
 
     try {
       let response: any = null
-      response = await apiClient.analyzeByLayer(selectedLayer)
+      response = await apiClient.analyzeByLayer(selectedLayer, analyzeAbortRef.current.signal)
 
       if (!response) {
         throw new Error('No response from analysis')
@@ -257,12 +265,17 @@ export default function AnalysisPage() {
         throw new Error('Invalid response from server')
       }
     } catch (error: any) {
-      const errorMsg = error.response?.data?.detail || error.message || 'Analysis failed'
-      setError(errorMsg)
-      console.error('Analysis error:', errorMsg)
+      if (error?.name === 'CanceledError' || error?.code === 'ERR_CANCELED') {
+        setError('Analysis was cancelled')
+      } else {
+        const errorMsg = error.response?.data?.detail || error.message || 'Analysis failed'
+        setError(errorMsg)
+        console.error('Analysis error:', errorMsg)
+      }
     } finally {
       setIsLoading(false)
       setStartTime(null)
+      analyzeAbortRef.current = null
     }
   }
   const getScoreColor = (score: number) => {
@@ -776,36 +789,15 @@ export default function AnalysisPage() {
 
         {/* Error State */}
         {error && (
-          <Card className="relative overflow-hidden border-0 shadow-lg hover:shadow-xl hover:shadow-red-500/25 transition-all duration-300">
-            {/* Gradient border */}
-            <div className="absolute inset-0 rounded-lg p-[2px] bg-gradient-to-r from-red-500 via-rose-500 to-pink-500">
-              <div className="w-full h-full bg-background rounded-lg" />
+          <div className="flex items-start gap-3 rounded-xl border border-red-500/20 bg-red-500/[0.07] p-4 animate-in slide-in-from-top-2">
+            <div className="shrink-0 rounded-lg bg-red-500/10 p-2">
+              <AlertTriangle className="h-4 w-4 text-red-400" />
             </div>
-
-            {/* Background gradient overlay */}
-            <div className="absolute inset-[2px] rounded-lg bg-[radial-gradient(circle_at_bottom_right,var(--tw-gradient-stops))] from-red-500/30 via-red-500/15 to-red-500/5" />
-
-            <CardContent className="p-6 relative">
-              <div className="flex items-start gap-4">
-                <div className="rounded-xl bg-red-500/10 p-3 flex-shrink-0">
-                  <AlertTriangle className="h-6 w-6 text-red-500" />
-                </div>
-                <div className="flex-1 space-y-3">
-                  <div>
-                    <h3 className="text-lg font-bold">Analysis Failed</h3>
-                    <p className="text-sm text-muted-foreground">Unable to complete analysis</p>
-                  </div>
-                  <div className="rounded-lg bg-red-500/10 border border-red-500/20 p-3.5">
-                    <p className="text-sm text-red-700 dark:text-red-300 font-medium">{error}</p>
-                  </div>
-                  <Button onClick={handleAnalyze} className="w-full" variant="outline">
-                    <Activity className="mr-2 h-4 w-4" />
-                    Retry Analysis
-                  </Button>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-red-400">Analysis Failed</p>
+              <p className="text-xs text-muted-foreground mt-0.5">{error}</p>
+            </div>
+          </div>
         )}
 
         {/* Loading State */}
@@ -849,6 +841,14 @@ export default function AnalysisPage() {
                   <div className="w-32 ml-1">
                     <Progress value={progressValue} className="h-1.5" />
                   </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleCancel}
+                    className="ml-2 h-7 px-2.5 text-xs text-red-400 hover:text-red-300 hover:bg-red-500/10 border border-red-500/30"
+                  >
+                    <XCircle className="mr-1.5 h-3 w-3" />Cancel
+                  </Button>
                 </div>
               </div>
               {/* Animated step indicators */}
