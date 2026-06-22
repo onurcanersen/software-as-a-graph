@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useState, useEffect, useCallback, useMemo } from "react"
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react"
 import { AppLayout } from "@/components/layout/app-layout"
 import { NoConnectionInfo } from "@/components/layout/no-connection-info"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -76,6 +76,15 @@ function getBandwidthColor(bps: number, maxBps: number): string {
 }
 
 const LS_CONFIGS_KEY = "traffic_sim_configs"
+
+function useDebounce<T>(value: T, delay: number): T {
+  const [debouncedValue, setDebouncedValue] = useState(value)
+  useEffect(() => {
+    const handler = setTimeout(() => setDebouncedValue(value), delay)
+    return () => clearTimeout(handler)
+  }, [value, delay])
+  return debouncedValue
+}
 
 // ============================================================================
 // Main Page
@@ -191,6 +200,30 @@ export default function TrafficSimulatorPage() {
     }
   }, [savedConfigs, hasRestored])
 
+  function toggleGroup(roleKey: string, roleApps: AppInfo[]) {
+    const myIds = new Set(roleApps.flatMap(a => [...a.pub_topic_ids, ...a.sub_topic_ids]))
+    if (selectedRoleKeys.has(roleKey)) {
+      setSelectedRoleKeys(prev => {
+        const next = new Set(prev)
+        next.delete(roleKey)
+        return next
+      })
+      const otherRoleTopics = new Set<string>()
+      for (const [otherKey, otherApps] of roleMap.entries()) {
+        if (otherKey === roleKey || !selectedRoleKeys.has(otherKey)) continue
+        for (const a of otherApps) {
+          for (const tid of [...a.pub_topic_ids, ...a.sub_topic_ids]) {
+            otherRoleTopics.add(tid)
+          }
+        }
+      }
+      setSelectedTopicIds(prev => prev.filter(tid => !myIds.has(tid) || otherRoleTopics.has(tid)))
+    } else {
+      setSelectedRoleKeys(prev => new Set([...prev, roleKey]))
+      setSelectedTopicIds(prev => Array.from(new Set([...prev, ...myIds])))
+    }
+  }
+
   // ------------------------------------------------------------------
   // Actions
   // ------------------------------------------------------------------
@@ -272,13 +305,11 @@ export default function TrafficSimulatorPage() {
   }
 
   function getComponentName(id: string): string {
-    const comp = components.find(c => c.id === id)
-    return comp ? comp.name : id
+    return componentLookup.get(id)?.name ?? id
   }
 
   function getComponentType(id: string): string {
-    const comp = components.find(c => c.id === id)
-    return comp ? comp.type : "Unknown"
+    return componentLookup.get(id)?.type ?? "Unknown"
   }
 
   function getImpactColor(impact: number): string {
@@ -411,12 +442,31 @@ export default function TrafficSimulatorPage() {
   // Derived
   // ------------------------------------------------------------------
 
-  const topicById = Object.fromEntries(topics.map(t => [t.id, t]))
+  const topicById = useMemo(() => Object.fromEntries(topics.map(t => [t.id, t])), [topics])
+
+  const selectedTopicIdSet = useMemo(() => new Set(selectedTopicIds), [selectedTopicIds])
+
+  const failureTargetIdSet = useMemo(() => new Set(failureTargetIds), [failureTargetIds])
+
+  const componentLookup = useMemo(() => {
+    const byId = new Map<string, { name: string; type: string }>()
+    for (const c of components) {
+      byId.set(c.id, { name: c.name, type: c.type })
+    }
+    return byId
+  }, [components])
+
+  const debouncedTopicSearch = useDebounce(topicSearch, 200)
+  const debouncedAppSearch = useDebounce(appSearch, 200)
+  const debouncedRoleSearch = useDebounce(roleSearch, 200)
+  const debouncedFailureSearch = useDebounce(failureSearch, 200)
+  const debouncedCascadedSearch = useDebounce(cascadedSearch, 200)
 
   const filteredApps = React.useMemo(() => {
+    const search = debouncedAppSearch.toLowerCase()
     let list = apps.filter(a =>
-      a.name.toLowerCase().includes(appSearch.toLowerCase()) ||
-      a.id.toLowerCase().includes(appSearch.toLowerCase())
+      a.name.toLowerCase().includes(search) ||
+      a.id.toLowerCase().includes(search)
     )
     list = [...list].sort((a, b) => {
       if (appSort === "name")   return a.name.localeCompare(b.name)
@@ -429,13 +479,14 @@ export default function TrafficSimulatorPage() {
       return 0
     })
     return list
-  }, [apps, appSearch, appSort])
+  }, [apps, debouncedAppSearch, appSort])
 
   const filteredTopics = React.useMemo(() => {
+    const search = debouncedTopicSearch.toLowerCase()
     let list = topics.filter(t => {
       const matchesSearch =
-        t.name.toLowerCase().includes(topicSearch.toLowerCase()) ||
-        t.id.toLowerCase().includes(topicSearch.toLowerCase())
+        t.name.toLowerCase().includes(search) ||
+        t.id.toLowerCase().includes(search)
       const matchesQos =
         topicQosFilter === "all" ||
         (t.qos_reliability || "").toLowerCase() === topicQosFilter.toLowerCase() ||
@@ -444,9 +495,8 @@ export default function TrafficSimulatorPage() {
       return matchesSearch && matchesQos
     })
     list = [...list].sort((a, b) => {
-      // Selected topics float to the top
-      const aSelected = selectedTopicIds.includes(a.id)
-      const bSelected = selectedTopicIds.includes(b.id)
+      const aSelected = selectedTopicIdSet.has(a.id)
+      const bSelected = selectedTopicIdSet.has(b.id)
       if (aSelected !== bSelected) return aSelected ? -1 : 1
       if (topicSort === "name")   return a.name.localeCompare(b.name)
       if (topicSort === "pub")    return b.publisher_count - a.publisher_count
@@ -454,7 +504,7 @@ export default function TrafficSimulatorPage() {
       return 0
     })
     return list
-  }, [topics, topicSearch, topicQosFilter, topicSort, selectedTopicIds])
+  }, [topics, debouncedTopicSearch, topicQosFilter, topicSort, selectedTopicIdSet])
 
   const qosOptions = React.useMemo(() => {
     const reliabilityVals = Array.from(new Set(topics.map(t => t.qos_reliability).filter(Boolean))) as string[]
@@ -474,7 +524,141 @@ export default function TrafficSimulatorPage() {
   }
 
   const allVisibleSelected =
-    filteredTopics.length > 0 && filteredTopics.every(t => selectedTopicIds.includes(t.id))
+    filteredTopics.length > 0 && filteredTopics.every(t => selectedTopicIdSet.has(t.id))
+
+  const sortedApps = useMemo(() => {
+    const fullySelected: AppInfo[] = []
+    const partialSelected: AppInfo[] = []
+    const unselected: AppInfo[] = []
+    for (const a of filteredApps) {
+      const ids = Array.from(new Set([...a.pub_topic_ids, ...a.sub_topic_ids]))
+      if (ids.length === 0) { unselected.push(a); continue }
+      const selectedCount = ids.filter(tid => selectedTopicIdSet.has(tid)).length
+      if (selectedCount === ids.length) fullySelected.push(a)
+      else if (selectedCount > 0) partialSelected.push(a)
+      else unselected.push(a)
+    }
+    return [...fullySelected, ...partialSelected, ...unselected]
+  }, [filteredApps, selectedTopicIdSet])
+
+  const roleMap = useMemo(() => {
+    const map = new Map<string, AppInfo[]>()
+    for (const app of apps) {
+      const roles = (app.role && app.role.length > 0) ? app.role : ["(unset)"]
+      for (const r of roles) {
+        if (!map.has(r)) map.set(r, [])
+        map.get(r)!.push(app)
+      }
+    }
+    return map
+  }, [apps])
+
+  const roleKeys = useMemo(() => {
+    const search = debouncedRoleSearch.toLowerCase()
+    return Array.from(roleMap.keys()).sort().filter(k =>
+      k.toLowerCase().includes(search)
+    )
+  }, [roleMap, debouncedRoleSearch])
+
+  const sortedRoleKeys = useMemo(() => {
+    const selected: string[] = []
+    const partial: string[] = []
+    const unselected: string[] = []
+    for (const k of roleKeys) {
+      if (selectedRoleKeys.has(k)) { selected.push(k); continue }
+      const roleApps = roleMap.get(k)!
+      const hasPartial = roleApps.some(a => {
+        const ids = Array.from(new Set([...a.pub_topic_ids, ...a.sub_topic_ids]))
+        return ids.some(tid => selectedTopicIdSet.has(tid))
+      })
+      if (hasPartial) partial.push(k)
+      else unselected.push(k)
+    }
+    return [...selected, ...partial, ...unselected]
+  }, [roleKeys, roleMap, selectedRoleKeys, selectedTopicIdSet])
+
+  const filteredFailureComponents = useMemo(() => {
+    const search = debouncedFailureSearch.toLowerCase()
+    const result: Record<string, typeof components> = {}
+    for (const [type, comps] of Object.entries(groupedComponents)) {
+      result[type] = comps.filter(c =>
+        c.name.toLowerCase().includes(search) ||
+        c.id.toLowerCase().includes(search)
+      )
+    }
+    return result
+  }, [groupedComponents, debouncedFailureSearch])
+
+  const failureTypeCounts = useMemo(() => {
+    const search = debouncedFailureSearch.toLowerCase()
+    const counts: Record<string, number> = {}
+    for (const [type, comps] of Object.entries(groupedComponents)) {
+      counts[type] = comps.filter(c =>
+        c.name.toLowerCase().includes(search) ||
+        c.id.toLowerCase().includes(search)
+      ).length
+    }
+    return counts
+  }, [groupedComponents, debouncedFailureSearch])
+
+  const trafficChartOptions = useMemo(() => {
+    if (!result) return null
+    const usedMbps = result.summary.total_network_mbps
+    const utilPct = Math.min((usedMbps / networkCapacityMbps) * 100, 100)
+    const gaugeColor = utilPct > 85 ? "#ef4444" : utilPct > 60 ? "#f97316" : "#22c55e"
+
+    const gaugeOption = {
+      series: [{
+        type: "gauge",
+        startAngle: 210,
+        endAngle: -30,
+        min: 0,
+        max: 100,
+        radius: "85%",
+        progress: { show: true, width: 14, itemStyle: { color: gaugeColor } },
+        axisLine: { lineStyle: { width: 14, color: [[1, "#27272a"]] } },
+        axisTick: { show: false },
+        splitLine: { show: false },
+        axisLabel: { show: false },
+        pointer: { show: false },
+        detail: {
+          valueAnimation: true,
+          formatter: (v: number) => `${v.toFixed(1)}%`,
+          color: gaugeColor,
+          fontSize: 22,
+          fontWeight: "bold",
+          offsetCenter: [0, "10%"],
+        },
+        title: { show: true, offsetCenter: [0, "38%"], fontSize: 12, color: "#71717a" },
+        data: [{ value: parseFloat(utilPct.toFixed(2)), name: "Network Used" }],
+      }],
+      backgroundColor: "transparent",
+    }
+
+    const topicNames = result.per_topic.map(t => (t.topic_name ?? t.topic_id).length > 20 ? (t.topic_name ?? t.topic_id).slice(0, 18) + "…" : (t.topic_name ?? t.topic_id))
+    const topicBwMbps = result.per_topic.map(t => parseFloat((t.bandwidth_total_bps / 1_000_000).toFixed(3)))
+    const topicBarOption = {
+      tooltip: { trigger: "axis", formatter: (p: any) => `${p[0].name}<br/>${p[0].value} MB/s` },
+      grid: { top: 8, bottom: 40, left: 12, right: 12, containLabel: true },
+      xAxis: { type: "category", data: topicNames, axisLabel: { fontSize: 11, color: "#a1a1aa", rotate: topicNames.length > 8 ? 30 : 0 } },
+      yAxis: { type: "value", name: "MB/s", nameTextStyle: { color: "#a1a1aa", fontSize: 11 }, axisLabel: { color: "#a1a1aa", fontSize: 11 } },
+      series: [{ type: "bar", data: topicBwMbps, itemStyle: { color: "#3b82f6", borderRadius: [3, 3, 0, 0] } }],
+      backgroundColor: "transparent",
+    }
+
+    const brokerNames = result.broker_usage.map(b => b.broker_name.length > 16 ? b.broker_name.slice(0, 14) + "…" : b.broker_name)
+    const brokerBwMbps = result.broker_usage.map(b => parseFloat(b.bandwidth_mbps.toFixed(3)))
+    const brokerBarOption = {
+      tooltip: { trigger: "axis", formatter: (p: any) => `${p[0].name}<br/>${p[0].value} MB/s` },
+      grid: { top: 8, bottom: 40, left: 12, right: 12, containLabel: true },
+      xAxis: { type: "category", data: brokerNames, axisLabel: { fontSize: 11, color: "#a1a1aa", rotate: brokerNames.length > 6 ? 30 : 0 } },
+      yAxis: { type: "value", name: "MB/s", nameTextStyle: { color: "#a1a1aa", fontSize: 11 }, axisLabel: { color: "#a1a1aa", fontSize: 11 } },
+      series: [{ type: "bar", data: brokerBwMbps, itemStyle: { color: "#a855f7", borderRadius: [3, 3, 0, 0] } }],
+      backgroundColor: "transparent",
+    }
+
+    return { gaugeOption, topicBarOption, brokerBarOption, usedMbps, utilPct, gaugeColor }
+  }, [result, networkCapacityMbps])
 
   // ------------------------------------------------------------------
   // Render
@@ -513,6 +697,40 @@ export default function TrafficSimulatorPage() {
                   <Skeleton className="h-4 flex-1" style={{ width: `${50 + (i * 13) % 40}%`, flex: "none" }} />
                 </div>
               ))}
+            </div>
+          </div>
+
+          {/* Results Card Skeleton */}
+          <div className="rounded-xl border border-border bg-muted/20 p-6 space-y-6">
+            <div className="flex items-center justify-between">
+              <div className="flex-1 space-y-3">
+                <Skeleton className="h-6 w-6 rounded" />
+                <Skeleton className="h-5 w-48" />
+                <Skeleton className="h-4 w-64" />
+              </div>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-center">
+              <div className="flex flex-col items-center space-y-3">
+                <Skeleton className="h-[200px] w-[200px] rounded-full" />
+                <Skeleton className="h-5 w-20" />
+                <Skeleton className="h-3 w-32" />
+              </div>
+              <div className="sm:col-span-2 grid grid-cols-2 gap-3">
+                {Array.from({ length: 8 }).map((_, i) => (
+                  <div key={i} className="rounded-md border border-border bg-muted/30 px-3 py-2 space-y-2">
+                    <Skeleton className="h-3 w-24" />
+                    <Skeleton className="h-4 w-16" />
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Skeleton className="h-4 w-56" />
+              <Skeleton className="h-[200px] w-full rounded-md" />
+            </div>
+            <div className="space-y-2">
+              <Skeleton className="h-4 w-48" />
+              <Skeleton className="h-[200px] w-full rounded-md" />
             </div>
           </div>
         </div>
@@ -769,7 +987,7 @@ export default function TrafficSimulatorPage() {
                     <div className="flex items-center justify-between text-xs text-muted-foreground">
                       <span>
                         {filteredTopics.length} topic{filteredTopics.length !== 1 ? "s" : ""}
-                        {topicSearch || topicQosFilter !== "all" ? ` (filtered from ${topics.length})` : ""}
+                        {debouncedTopicSearch || topicQosFilter !== "all" ? ` (filtered from ${topics.length})` : ""}
                       </span>
                       <div className="flex gap-2">
                         <button
@@ -782,7 +1000,7 @@ export default function TrafficSimulatorPage() {
                         <span>·</span>
                         <button
                           className="hover:text-foreground underline-offset-2 hover:underline disabled:opacity-40"
-                          disabled={filteredTopics.every(t => !selectedTopicIds.includes(t.id))}
+                          disabled={filteredTopics.every(t => !selectedTopicIdSet.has(t.id))}
                           onClick={deselectAllVisible}
                         >
                           Deselect visible
@@ -798,7 +1016,7 @@ export default function TrafficSimulatorPage() {
                       ) : (
                         <div className="max-h-96 overflow-y-auto divide-y">
                           {filteredTopics.map(topic => {
-                            const selected = selectedTopicIds.includes(topic.id)
+                            const selected = selectedTopicIdSet.has(topic.id)
 
                             return (
                               <div
@@ -974,7 +1192,7 @@ export default function TrafficSimulatorPage() {
 
                     <div className="text-xs text-muted-foreground">
                       {filteredApps.length} application{filteredApps.length !== 1 ? "s" : ""}
-                      {appSearch ? ` (filtered from ${apps.length})` : ""}
+                      {debouncedAppSearch ? ` (filtered from ${apps.length})` : ""}
                       {" · Selecting an app includes all its topics in the simulation."}
                     </div>
 
@@ -986,23 +1204,9 @@ export default function TrafficSimulatorPage() {
                         </div>
                       ) : (
                         <div className="max-h-96 overflow-y-auto divide-y">
-                          {[
-                            ...filteredApps.filter(a => {
-                              const ids = Array.from(new Set([...a.pub_topic_ids, ...a.sub_topic_ids]))
-                              return ids.length > 0 && ids.every(tid => selectedTopicIds.includes(tid))
-                            }),
-                            ...filteredApps.filter(a => {
-                              const ids = Array.from(new Set([...a.pub_topic_ids, ...a.sub_topic_ids]))
-                              const count = ids.filter(tid => selectedTopicIds.includes(tid)).length
-                              return count > 0 && count < ids.length
-                            }),
-                            ...filteredApps.filter(a => {
-                              const ids = Array.from(new Set([...a.pub_topic_ids, ...a.sub_topic_ids]))
-                              return ids.length === 0 || ids.every(tid => !selectedTopicIds.includes(tid))
-                            }),
-                          ].map(app => {
+                          {sortedApps.map(app => {
                             const allTopicIds = Array.from(new Set([...app.pub_topic_ids, ...app.sub_topic_ids]))
-                            const selectedCount = allTopicIds.filter(tid => selectedTopicIds.includes(tid)).length
+                            const selectedCount = allTopicIds.filter(tid => selectedTopicIdSet.has(tid)).length
                             const isFullySelected = allTopicIds.length > 0 && selectedCount === allTopicIds.length
                             const isPartiallySelected = selectedCount > 0 && selectedCount < allTopicIds.length
                             const hasTopics = allTopicIds.length > 0
@@ -1095,60 +1299,6 @@ export default function TrafficSimulatorPage() {
                     <Button variant="ghost" size="sm" onClick={loadApps}>Retry</Button>
                   </div>
                 ) : (() => {
-                  // Group apps by their individual roles; apps with multiple roles appear in multiple groups
-                  const roleMap = new Map<string, AppInfo[]>()
-                  for (const app of apps) {
-                    const roles = (app.role && app.role.length > 0) ? app.role : ["(unset)"]
-                    for (const r of roles) {
-                      if (!roleMap.has(r)) roleMap.set(r, [])
-                      roleMap.get(r)!.push(app)
-                    }
-                  }
-                  const roleKeys = Array.from(roleMap.keys()).sort().filter(k =>
-                    k.toLowerCase().includes(roleSearch.toLowerCase())
-                  )
-
-                  // A role is fully selected only when the user explicitly selected it.
-                  function isRoleSelected(roleKey: string) {
-                    return selectedRoleKeys.has(roleKey)
-                  }
-
-                  // Partial: some topics are selected (e.g. via the Apps/Topics tabs) but the
-                  // role itself was not explicitly selected as a whole.
-                  function isGroupPartiallySelected(roleKey: string, roleApps: AppInfo[]) {
-                    if (selectedRoleKeys.has(roleKey)) return false
-                    return roleApps.some(a => {
-                      const ids = Array.from(new Set([...a.pub_topic_ids, ...a.sub_topic_ids]))
-                      return ids.some(tid => selectedTopicIds.includes(tid))
-                    })
-                  }
-
-                  function toggleGroup(roleKey: string, roleApps: AppInfo[]) {
-                    const myIds = new Set(roleApps.flatMap(a => [...a.pub_topic_ids, ...a.sub_topic_ids]))
-                    if (selectedRoleKeys.has(roleKey)) {
-                      // Deselect: remove this role, keep topics still needed by other selected roles
-                      setSelectedRoleKeys(prev => {
-                        const next = new Set(prev)
-                        next.delete(roleKey)
-                        return next
-                      })
-                      const otherRoleTopics = new Set<string>()
-                      for (const [otherKey, otherApps] of roleMap.entries()) {
-                        if (otherKey === roleKey || !selectedRoleKeys.has(otherKey)) continue
-                        for (const a of otherApps) {
-                          for (const tid of [...a.pub_topic_ids, ...a.sub_topic_ids]) {
-                            otherRoleTopics.add(tid)
-                          }
-                        }
-                      }
-                      setSelectedTopicIds(prev => prev.filter(tid => !myIds.has(tid) || otherRoleTopics.has(tid)))
-                    } else {
-                      // Select: add role and its topics
-                      setSelectedRoleKeys(prev => new Set([...prev, roleKey]))
-                      setSelectedTopicIds(prev => Array.from(new Set([...prev, ...myIds])))
-                    }
-                  }
-
                   return (
                     <div className="space-y-3">
                       {/* Search */}
@@ -1171,7 +1321,7 @@ export default function TrafficSimulatorPage() {
                       </div>
                       <div className="text-xs text-muted-foreground">
                         {roleKeys.length} role{roleKeys.length !== 1 ? "s" : ""}
-                        {roleSearch ? ` (filtered from ${Array.from(roleMap.keys()).length})` : ""}
+                        {debouncedRoleSearch ? ` (filtered from ${roleMap.size})` : ""}
                         {" · Selecting a role includes every topic those apps publish to or subscribe to."}
                       </div>
                       {apps.length === 0 ? (
@@ -1184,14 +1334,13 @@ export default function TrafficSimulatorPage() {
                         </div>
                       ) : (
                         <div className="border rounded-lg overflow-hidden divide-y">
-                          {[
-                            ...roleKeys.filter(k => isRoleSelected(k)),
-                            ...roleKeys.filter(k => isGroupPartiallySelected(k, roleMap.get(k)!)),
-                            ...roleKeys.filter(k => !isRoleSelected(k) && !isGroupPartiallySelected(k, roleMap.get(k)!)),
-                          ].map(roleKey => {
+                          {sortedRoleKeys.map(roleKey => {
                             const roleApps = roleMap.get(roleKey)!
-                            const fullySelected = isRoleSelected(roleKey)
-                            const partiallySelected = isGroupPartiallySelected(roleKey, roleApps)
+                            const fullySelected = selectedRoleKeys.has(roleKey)
+                            const partiallySelected = !fullySelected && roleApps.some(a => {
+                              const ids = Array.from(new Set([...a.pub_topic_ids, ...a.sub_topic_ids]))
+                              return ids.some(tid => selectedTopicIdSet.has(tid))
+                            })
                             const topicCount = new Set(roleApps.flatMap(a => [...a.pub_topic_ids, ...a.sub_topic_ids])).size
                             return (
                               <div
@@ -1332,7 +1481,15 @@ export default function TrafficSimulatorPage() {
               {/* Sub-tabs for component types */}
               <Tabs value={failureTypeTab || availableTypes[0]} onValueChange={setFailureTypeTab} className="w-full">
                 <TabsList className="bg-background border border-border w-fit flex-wrap h-auto justify-start">
-                  {availableTypes.map(type => {
+                  {componentsLoading ? (
+                    <div className="flex items-center gap-2 py-1">
+                      <Skeleton className="h-8 w-20 rounded-md" />
+                      <Skeleton className="h-8 w-24 rounded-md" />
+                      <Skeleton className="h-8 w-16 rounded-md" />
+                      <Skeleton className="h-8 w-20 rounded-md" />
+                    </div>
+                  ) : (
+                  availableTypes.map(type => {
                     const typeLower = type.toLowerCase()
                     let Icon = Box
                     if (typeLower.includes("app") || typeLower === "application") Icon = Server
@@ -1350,55 +1507,65 @@ export default function TrafficSimulatorPage() {
                         <Icon className="h-4 w-4" />
                         {type.charAt(0).toUpperCase() + type.slice(1)}
                         <span className="text-xs text-muted-foreground">
-                          ({(groupedComponents[type] || []).filter(c => 
-                            c.name.toLowerCase().includes(failureSearch.toLowerCase()) || 
-                            c.id.toLowerCase().includes(failureSearch.toLowerCase())
-                          ).length})
+                          ({failureTypeCounts[type] ?? 0})
                         </span>
                       </TabsTrigger>
                     )
-                  })}
+                  })
+                  )}
                 </TabsList>
 
-                <div>
-                  {/* Search bar */}
-                  <div className="flex flex-wrap gap-2">
-                    <div className="relative flex-1 min-w-[180px]">
-                      <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
-                      <Input
-                        placeholder="Search components…"
-                        value={failureSearch}
-                        onChange={e => setFailureSearch(e.target.value)}
-                        className="pl-8 h-8 text-sm"
-                      />
-                      {failureSearch && (
-                        <button
-                          className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                          onClick={() => setFailureSearch("")}
-                        >
-                          <X className="h-3.5 w-3.5" />
-                        </button>
-                      )}
+                  <div>
+                    {/* Search bar */}
+                    <div className="flex flex-wrap gap-2">
+                      <div className="relative flex-1 min-w-[180px]">
+                        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+                        <Input
+                          placeholder="Search components…"
+                          value={failureSearch}
+                          onChange={e => setFailureSearch(e.target.value)}
+                          className="pl-8 h-8 text-sm"
+                          disabled={componentsLoading}
+                        />
+                        {failureSearch && !componentsLoading && (
+                          <button
+                            className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                            onClick={() => setFailureSearch("")}
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                      </div>
                     </div>
-                  </div>
 
-                  {availableTypes.map(type => {
-                    const filtered = (groupedComponents[type] || []).filter(comp => 
-                      comp.name.toLowerCase().includes(failureSearch.toLowerCase()) || 
-                      comp.id.toLowerCase().includes(failureSearch.toLowerCase())
-                    )
+                    {componentsLoading ? (
+                      <div className="space-y-2 py-2">
+                        {Array.from({ length: 8 }).map((_, i) => (
+                          <div key={i} className="flex items-center gap-3 px-3 py-2.5 border rounded-lg animate-pulse">
+                            <Skeleton className="h-4 w-4 rounded shrink-0" />
+                            <div className="flex-1 space-y-1.5">
+                              <Skeleton className="h-3 rounded" style={{ width: `${50 + (i * 13) % 40}%` }} />
+                              <Skeleton className="h-2.5 rounded w-32" />
+                            </div>
+                            <Skeleton className="h-5 w-14 rounded-full shrink-0" />
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                    availableTypes.map(type => {
+                    const filtered = filteredFailureComponents[type] || []
                     const total = (groupedComponents[type] || []).length
                     return (
                       <TabsContent key={type} value={type} className="mt-0">
                         <div className="text-xs text-muted-foreground py-3">
                           {filtered.length} component{filtered.length !== 1 ? "s" : ""}
-                          {failureSearch && total !== filtered.length ? ` (filtered from ${total})` : ""}
+                          {debouncedFailureSearch && total !== filtered.length ? ` (filtered from ${total})` : ""}
                           {" · Selecting a component simulates its failure impact on the system."}
                         </div>
                         <div className="border rounded-lg overflow-hidden">
                           <div className="max-h-96 overflow-y-auto divide-y">
                             {filtered.map((comp) => {
-                              const selected = failureTargetIds.includes(comp.id)
+                              const selected = failureTargetIdSet.has(comp.id)
                               return (
                                 <div
                                   key={comp.id}
@@ -1440,7 +1607,8 @@ export default function TrafficSimulatorPage() {
                         </div>
                       </TabsContent>
                     )
-                  })}
+                  })
+                  )}
                 </div>
               </Tabs>
             </CardContent>
@@ -1449,60 +1617,48 @@ export default function TrafficSimulatorPage() {
         </div>
 
         {/* ── Results ─────────────────────────────────────────────── */}
-        {simMode === "traffic" && result && (() => {
-          const usedMbps = result.summary.total_network_mbps
-          const utilPct = Math.min((usedMbps / networkCapacityMbps) * 100, 100)
-          const gaugeColor = utilPct > 85 ? "#ef4444" : utilPct > 60 ? "#f97316" : "#22c55e"
+        {/* ── Traffic Simulation Results Skeleton ─────────────────── */}
+        {simMode === "traffic" && loading && (
+          <Card className="border-border bg-background">
+            <CardHeader className="pb-3">
+              <div className="flex items-center justify-between flex-wrap gap-3">
+                <div className="space-y-3">
+                  <Skeleton className="h-6 w-6 rounded" />
+                  <Skeleton className="h-5 w-48" />
+                  <Skeleton className="h-4 w-64" />
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-center">
+                <div className="flex flex-col items-center space-y-3">
+                  <Skeleton className="h-[200px] w-[200px] rounded-full" />
+                  <Skeleton className="h-5 w-20" />
+                  <Skeleton className="h-3 w-32" />
+                </div>
+                <div className="sm:col-span-2 grid grid-cols-2 gap-3">
+                  {Array.from({ length: 8 }).map((_, i) => (
+                    <div key={i} className="rounded-md border border-border bg-muted/30 px-3 py-2 space-y-2">
+                      <Skeleton className="h-3 w-24" />
+                      <Skeleton className="h-4 w-16" />
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Skeleton className="h-4 w-56" />
+                <Skeleton className="h-[200px] w-full rounded-md" />
+              </div>
+              <div className="space-y-2">
+                <Skeleton className="h-4 w-48" />
+                <Skeleton className="h-[200px] w-full rounded-md" />
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
-          const gaugeOption = {
-            series: [{
-              type: "gauge",
-              startAngle: 210,
-              endAngle: -30,
-              min: 0,
-              max: 100,
-              radius: "85%",
-              progress: { show: true, width: 14, itemStyle: { color: gaugeColor } },
-              axisLine: { lineStyle: { width: 14, color: [[1, "#27272a"]] } },
-              axisTick: { show: false },
-              splitLine: { show: false },
-              axisLabel: { show: false },
-              pointer: { show: false },
-              detail: {
-                valueAnimation: true,
-                formatter: (v: number) => `${v.toFixed(1)}%`,
-                color: gaugeColor,
-                fontSize: 22,
-                fontWeight: "bold",
-                offsetCenter: [0, "10%"],
-              },
-              title: { show: true, offsetCenter: [0, "38%"], fontSize: 12, color: "#71717a" },
-              data: [{ value: parseFloat(utilPct.toFixed(2)), name: "Network Used" }],
-            }],
-            backgroundColor: "transparent",
-          }
-
-          const topicNames = result.per_topic.map(t => (t.topic_name ?? t.topic_id).length > 20 ? (t.topic_name ?? t.topic_id).slice(0, 18) + "…" : (t.topic_name ?? t.topic_id))
-          const topicBwMbps = result.per_topic.map(t => parseFloat((t.bandwidth_total_bps / 1_000_000).toFixed(3)))
-          const topicBarOption = {
-            tooltip: { trigger: "axis", formatter: (p: any) => `${p[0].name}<br/>${p[0].value} MB/s` },
-            grid: { top: 8, bottom: 40, left: 12, right: 12, containLabel: true },
-            xAxis: { type: "category", data: topicNames, axisLabel: { fontSize: 11, color: "#a1a1aa", rotate: topicNames.length > 8 ? 30 : 0 } },
-            yAxis: { type: "value", name: "MB/s", nameTextStyle: { color: "#a1a1aa", fontSize: 11 }, axisLabel: { color: "#a1a1aa", fontSize: 11 } },
-            series: [{ type: "bar", data: topicBwMbps, itemStyle: { color: "#3b82f6", borderRadius: [3, 3, 0, 0] } }],
-            backgroundColor: "transparent",
-          }
-
-          const brokerNames = result.broker_usage.map(b => b.broker_name.length > 16 ? b.broker_name.slice(0, 14) + "…" : b.broker_name)
-          const brokerBwMbps = result.broker_usage.map(b => parseFloat(b.bandwidth_mbps.toFixed(3)))
-          const brokerBarOption = {
-            tooltip: { trigger: "axis", formatter: (p: any) => `${p[0].name}<br/>${p[0].value} MB/s` },
-            grid: { top: 8, bottom: 40, left: 12, right: 12, containLabel: true },
-            xAxis: { type: "category", data: brokerNames, axisLabel: { fontSize: 11, color: "#a1a1aa", rotate: brokerNames.length > 6 ? 30 : 0 } },
-            yAxis: { type: "value", name: "MB/s", nameTextStyle: { color: "#a1a1aa", fontSize: 11 }, axisLabel: { color: "#a1a1aa", fontSize: 11 } },
-            series: [{ type: "bar", data: brokerBwMbps, itemStyle: { color: "#a855f7", borderRadius: [3, 3, 0, 0] } }],
-            backgroundColor: "transparent",
-          }
+        {simMode === "traffic" && result && trafficChartOptions && (() => {
+          const { gaugeOption, topicBarOption, brokerBarOption, usedMbps, utilPct, gaugeColor } = trafficChartOptions
 
           return (
             <Card className="border-border bg-background">
@@ -1662,7 +1818,7 @@ export default function TrafficSimulatorPage() {
                 const filteredCascaded = (failureResult.cascaded_failures || []).filter(id => {
                   const name = getComponentName(id).toLowerCase()
                   const type = getComponentType(id).toLowerCase()
-                  const searchLower = cascadedSearch.toLowerCase()
+                  const searchLower = debouncedCascadedSearch.toLowerCase()
                   return name.includes(searchLower) || type.includes(searchLower) || id.toLowerCase().includes(searchLower)
                 })
                 const getTypeColor = (type: string) => {
