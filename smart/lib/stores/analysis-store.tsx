@@ -1,6 +1,6 @@
 "use client"
 
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react'
+import { createContext, useContext, useState, useEffect, useRef, ReactNode } from 'react'
 
 interface ComponentAnalysis {
   id: string
@@ -75,19 +75,15 @@ const AnalysisContext = createContext<AnalysisContextType | undefined>(undefined
 
 const STORAGE_KEY = 'analysis-cache'
 const CACHE_VERSION = 3
-const MAX_CACHE_ITEMS = 4 // one per layer: system, application, infrastructure, middleware
+const MAX_CACHE_ITEMS = 4
 
-// Access localStorage lazily so this module works during SSR (window is undefined server-side).
-// Never capture it at module evaluation time — Next.js evaluates modules on the server where
-// window doesn't exist, and a captured null would persist into the browser runtime.
 const getStorage = (): Storage | null => {
   if (typeof window === 'undefined') return null
   return window.localStorage
 }
 
-// Helper to compress data by keeping only essential fields
-const compressAnalysisResult = (result: AnalysisResult): AnalysisResult => {
-  return {
+const compressTier = (result: AnalysisResult, tier: number): AnalysisResult => {
+  const base: AnalysisResult = {
     context: result.context,
     description: result.description,
     summary: result.summary,
@@ -97,14 +93,74 @@ const compressAnalysisResult = (result: AnalysisResult): AnalysisResult => {
     problems: result.problems || [],
     logs: result.logs || [],
   }
+
+  if (tier <= 0) return base
+
+  const stripped = { ...base, logs: [] as string[] }
+
+  if (tier <= 1) return stripped
+
+  const noEdgeDetails: AnalysisResult = {
+    ...stripped,
+    edges: (stripped.edges || []).map(e => ({
+      source: e.source,
+      target: e.target,
+      type: e.type,
+      criticality_level: e.criticality_level,
+      scores: e.scores,
+    })),
+  }
+
+  if (tier <= 2) return noEdgeDetails
+
+  const slimComponents = noEdgeDetails.components.map(c => ({
+    id: c.id,
+    name: c.name,
+    type: c.type,
+    criticality_level: c.criticality_level,
+    scores: c.scores,
+  }))
+  const slimEdges = (noEdgeDetails.edges || []).map(e => ({
+    source: e.source,
+    target: e.target,
+    type: e.type,
+    criticality_level: e.criticality_level,
+    scores: e.scores,
+  }))
+  const slimProblems = noEdgeDetails.problems.map(p => ({
+    entity_id: p.entity_id,
+    type: p.type,
+    category: p.category,
+    severity: p.severity,
+    name: p.name,
+    description: p.description || '',
+    recommendation: p.recommendation || '',
+  }))
+
+  const slim: AnalysisResult = {
+    ...noEdgeDetails,
+    components: slimComponents,
+    edges: slimEdges,
+    problems: slimProblems,
+  }
+
+  if (tier <= 3) return slim
+
+  const maxItems = Math.max(50, Math.floor(500 / Math.pow(2, tier - 3)))
+  return {
+    ...slim,
+    components: slim.components.slice(0, maxItems),
+    edges: (slim.edges || []).slice(0, maxItems),
+    problems: slim.problems.slice(0, maxItems),
+  }
 }
 
-// Safe storage operations with error handling
+const MAX_TIERS = 6
+
 const saveToStorage = (cache: Record<string, AnalysisResult>) => {
   const storage = getStorage()
   if (!storage) return
 
-  // Keep only the most recent MAX_CACHE_ITEMS
   const keys = Object.keys(cache)
   const trimmedCache: Record<string, AnalysisResult> = {}
   const keysToKeep = keys.length > MAX_CACHE_ITEMS ? keys.slice(-MAX_CACHE_ITEMS) : keys
@@ -116,23 +172,28 @@ const saveToStorage = (cache: Record<string, AnalysisResult>) => {
 
   try {
     tryWrite(trimmedCache)
-  } catch (e1: any) {
-    if (e1.name !== 'QuotaExceededError') {
-      console.error('Failed to save analysis cache:', e1)
+    return
+  } catch (e: any) {
+    if (e.name !== 'QuotaExceededError') {
+      console.error('Failed to save analysis cache:', e)
       return
     }
-    // Quota exceeded — strip logs from each entry and retry once
+  }
+
+  for (let tier = 1; tier <= MAX_TIERS; tier++) {
     try {
-      const slim: Record<string, AnalysisResult> = {}
+      const degraded: Record<string, AnalysisResult> = {}
       Object.entries(trimmedCache).forEach(([k, v]) => {
-        slim[k] = { ...v, logs: [] }
+        degraded[k] = compressTier(v, tier)
       })
-      tryWrite(slim)
-    } catch (e2: any) {
-      console.warn('Storage quota exceeded even after stripping logs; cache not persisted')
-      storage.removeItem(STORAGE_KEY)
+      tryWrite(degraded)
+      return
+    } catch {
+      continue
     }
   }
+
+  console.warn('Storage quota exceeded at all compression tiers; cache not persisted')
 }
 
 const loadFromStorage = (): Record<string, AnalysisResult> => {
@@ -160,8 +221,8 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AnalysisState>({
     cache: {}
   })
+  const pendingSaveRef = useRef<Record<string, AnalysisResult> | null>(null)
 
-  // Load from localStorage on mount (client-only — window is unavailable during SSR)
   useEffect(() => {
     const loadedCache = loadFromStorage()
     if (Object.keys(loadedCache).length > 0) {
@@ -169,14 +230,20 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  useEffect(() => {
+    if (pendingSaveRef.current) {
+      saveToStorage(pendingSaveRef.current)
+      pendingSaveRef.current = null
+    }
+  }, [state.cache])
+
   const setAnalysis = (key: string, result: AnalysisResult) => {
     setState(prev => {
       const newCache = {
         ...prev.cache,
-        [key]: compressAnalysisResult(result)
+        [key]: compressTier(result, 0)
       }
-      // Save to localStorage after state update
-      saveToStorage(newCache)
+      pendingSaveRef.current = newCache
       return { ...prev, cache: newCache }
     })
   }
@@ -190,12 +257,12 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       setState(prev => {
         const newCache = { ...prev.cache }
         delete newCache[key]
-        saveToStorage(newCache)
+        pendingSaveRef.current = newCache
         return { ...prev, cache: newCache }
       })
     } else {
-      // Clear all
       setState({ cache: {} })
+      pendingSaveRef.current = null
       const storage = getStorage()
       if (storage) storage.removeItem(STORAGE_KEY)
     }
@@ -203,6 +270,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
 
   const clearAll = () => {
     setState({ cache: {} })
+    pendingSaveRef.current = null
     const storage = getStorage()
     if (storage) storage.removeItem(STORAGE_KEY)
   }
