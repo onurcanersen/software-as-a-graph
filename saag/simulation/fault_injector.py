@@ -25,7 +25,7 @@ For each candidate node v (Application or Broker by default):
   Cascade propagation (waves 1, 2, …)
     • For each orphaned topic, find all subscribers.
     • A subscriber propagates the cascade when its feed-loss fraction exceeds
-      *propagation_threshold* (default 1.0 = completely starved) AND it was
+      *propagation_threshold* (default 0.2 = aggressive feed loss starvation threshold) AND it was
       itself a publisher on other topics.  [DESIGN-FI-1]
     • A set-based pending queue prevents duplicate processing when a node
       loses feeds from multiple topics in the same wave.  [FIX: BUG-FI-2]
@@ -152,11 +152,13 @@ class FaultInjector:
     cascade_depth_limit : int, optional
         Maximum cascade waves.  0 = unlimited.  Default 0.
     propagation_threshold : float, optional
-        Fraction of feeds that must be lost before a subscriber itself stops
-        publishing (cascades further).  1.0 = completely starved (conservative
-        default).  Lower values model nodes that fail on partial feed loss.
-        For the ATM ConflictDetector, which needs both T_radar AND T_tracks,
-        0.5 would be appropriate.
+        Fraction of a subscriber's mean feed loss at or above which it may fail
+        (stochastically, scaled by depth damping).  Default 0.2 — a subscriber
+        becomes eligible to fail once it loses ~20% of its feed.  This is an
+        aggressive setting; raise toward 1.0 for a conservative
+        "only-on-total-starvation" cascade.  For nodes requiring all feeds
+        (e.g. ATM ConflictDetector needing T_radar AND T_tracks), 0.5 is more
+        appropriate.
     """
 
     def __init__(
@@ -166,10 +168,10 @@ class FaultInjector:
         cascade_depth_limit: int = 0,
         propagation_threshold: float = 0.2,
     ) -> None:
-        self.graph = graph
+        self.graph = graph.copy()
         
         # Derive DEPENDS_ON edges dynamically if they are missing
-        has_depends_on = any((d.get("type") or d.get("etype") or "").upper() == "DEPENDS_ON" for _, _, d in graph.edges(data=True))
+        has_depends_on = any((d.get("type") or d.get("etype") or "").upper() == "DEPENDS_ON" for _, _, d in self.graph.edges(data=True))
         if not has_depends_on:
             from collections import defaultdict
             topic_pubs = defaultdict(set)
@@ -177,7 +179,7 @@ class FaultInjector:
             pub_qos = {}
             sub_qos = {}
             uses_rels = []
-            for src, tgt, d in graph.edges(data=True):
+            for src, tgt, d in self.graph.edges(data=True):
                 etype = (d.get("type") or d.get("etype") or "").upper()
                 if etype == "PUBLISHES_TO":
                     topic_pubs[tgt].add(src)
@@ -195,15 +197,15 @@ class FaultInjector:
                     for publisher in publishers:
                         if subscriber != publisher:
                             qp = pub_qos.get((publisher, topic)) or sub_qos.get((subscriber, topic)) or {}
-                            graph.add_edge(subscriber, publisher, type="DEPENDS_ON", dependency_type="app_to_app", weight=1.0, qos_profile=qp)
+                            self.graph.add_edge(subscriber, publisher, type="DEPENDS_ON", dependency_type="app_to_app", weight=1.0, qos_profile=qp)
             # App depends on library (uses relationship)
             for app, lib in uses_rels:
-                graph.add_edge(app, lib, type="DEPENDS_ON", dependency_type="app_to_lib", weight=1.0)
+                self.graph.add_edge(app, lib, type="DEPENDS_ON", dependency_type="app_to_lib", weight=1.0)
                 
         self.seeds = seeds or [42]
         self.cascade_depth_limit = cascade_depth_limit
         self.propagation_threshold = max(0.0, min(1.0, propagation_threshold))
-        self._index = _PubSubIndex(graph)
+        self._index = _PubSubIndex(self.graph)
 
     # ── Public API ──────────────────────────────────────────────────────────
 
