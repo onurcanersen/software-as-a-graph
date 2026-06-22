@@ -58,6 +58,7 @@ interface SavedConfig {
   duration_sec: number
   message_size_bytes: number
   topic_params?: Record<string, TopicParams>
+  role_keys?: string[]
   created_at: string
 }
 
@@ -119,6 +120,7 @@ export default function TrafficSimulatorPage() {
   // ---- Saved configs ----
   const [savedConfigs, setSavedConfigs] = useState<SavedConfig[]>([])
   const [newConfigName, setNewConfigName] = useState("")
+  const [hasRestored, setHasRestored] = useState(false)
 
   // ---- Simulation Mode ----
   const [simMode, setSimMode] = useState<"traffic" | "failure">("traffic")
@@ -178,14 +180,16 @@ export default function TrafficSimulatorPage() {
     if (cfgs) {
       try { setSavedConfigs(JSON.parse(cfgs)) } catch { /* ignore */ }
     }
+    setHasRestored(true)
   }, [])
 
   // Persist saved configs
   useEffect(() => {
+    if (!hasRestored) return
     if (typeof window !== "undefined") {
       localStorage.setItem(LS_CONFIGS_KEY, JSON.stringify(savedConfigs))
     }
-  }, [savedConfigs])
+  }, [savedConfigs, hasRestored])
 
   // ------------------------------------------------------------------
   // Actions
@@ -359,14 +363,19 @@ export default function TrafficSimulatorPage() {
 
   function saveConfig() {
     const name = newConfigName.trim() || `Config ${savedConfigs.length + 1}`
+    const clonedParams: Record<string, TopicParams> = {}
+    for (const [k, v] of Object.entries(topicParams)) {
+      clonedParams[k] = { ...v }
+    }
     const cfg: SavedConfig = {
-      id: Date.now().toString(),
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
       name,
       topic_ids: [...selectedTopicIds],
-      frequency_hz: 0, // Deprecated - frequencies are now per-topic
+      frequency_hz: 0,
       duration_sec: durationSec,
       message_size_bytes: messageSizeBytes,
-      topic_params: { ...topicParams }, // Always save per-topic params
+      topic_params: clonedParams,
+      role_keys: Array.from(selectedRoleKeys),
       created_at: new Date().toISOString(),
     }
     setSavedConfigs(prev => [cfg, ...prev])
@@ -374,11 +383,23 @@ export default function TrafficSimulatorPage() {
   }
 
   function loadConfig(cfg: SavedConfig) {
-    setSelectedTopicIds(cfg.topic_ids)
+    setSelectionTab("roles")
+    setSelectedTopicIds([...cfg.topic_ids])
     setDurationSec(cfg.duration_sec)
     setMessageSizeBytes(cfg.message_size_bytes)
     if (cfg.topic_params) {
-      setTopicParams(cfg.topic_params)
+      const cloned: Record<string, TopicParams> = {}
+      for (const [k, v] of Object.entries(cfg.topic_params)) {
+        cloned[k] = { ...v }
+      }
+      setTopicParams(cloned)
+    } else {
+      setTopicParams({})
+    }
+    if (cfg.role_keys) {
+      setSelectedRoleKeys(new Set(cfg.role_keys))
+    } else {
+      setSelectedRoleKeys(new Set())
     }
   }
 
