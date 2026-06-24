@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query, Depends
+from fastapi import APIRouter, HTTPException, Query, Depends, Request
 from typing import Dict, Any, List, Optional
 import logging
 
@@ -20,8 +20,9 @@ from api.models import (
 )
 from tools.generation import GenerationService
 from saag.core.ports.graph_repository import IGraphRepository
-from api.dependencies import get_repository, get_generation_service
+from api.dependencies import get_repository, get_generation_service, get_client
 from api.presenters import graph_presenter
+from api._cancellable_runner import run_with_disconnect_watch, ClientDisconnected
 
 router = APIRouter(prefix="/api/v1/graph", tags=["graph"])
 logger = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 @router.post("/generate", response_model=GraphGenerationResponse)
 async def generate_graph(
     request: GenerateGraphRequest,
+    raw_request: Request,
     service: GenerationService = Depends(get_generation_service)
 ):
     """
@@ -37,8 +39,12 @@ async def generate_graph(
     """
     try:
         logger.info(f"Generating graph: scale={request.scale}, seed={request.seed}")
-        graph_data = service.generate()
+        graph_data = await run_with_disconnect_watch(raw_request, lambda ce: service.generate())
+        if graph_data is None:
+            raise ClientDisconnected()
         return graph_presenter.format_generation_response(graph_data, request.scale)
+    except ClientDisconnected:
+        raise HTTPException(status_code=499, detail="Client disconnected; operation stopped")
     except Exception as e:
         logger.error(f"Graph generation failed: {e}")
         raise HTTPException(status_code=500, detail=f"Graph generation failed: {e}")
@@ -47,6 +53,7 @@ async def generate_graph(
 @router.post("/generate-file", response_model=GraphGenerationResponse)
 async def generate_graph_file(
     request: GenerateGraphFileRequest,
+    raw_request: Request,
     service: GenerationService = Depends(get_generation_service)
 ):
     """
@@ -54,30 +61,37 @@ async def generate_graph_file(
     """
     try:
         logger.info(f"Generating graph file: scale={request.scale}, seed={request.seed}")
-        graph_data = service.generate()
+        graph_data = await run_with_disconnect_watch(raw_request, lambda ce: service.generate())
+        if graph_data is None:
+            raise ClientDisconnected()
         return graph_presenter.format_generation_response(graph_data, request.scale)
+    except ClientDisconnected:
+        raise HTTPException(status_code=499, detail="Client disconnected; operation stopped")
     except Exception as e:
         logger.error(f"Graph file generation failed: {e}")
         raise HTTPException(status_code=500, detail=f"Graph generation failed: {e}")
 
 
-from api.dependencies import get_repository, get_client
 from saag import Client
 
 @router.post("/import", response_model=GraphImportResponse)
 async def import_graph(
-    request: ImportGraphRequest,
+    req: ImportGraphRequest,
+    raw_request: Request,
     client: Client = Depends(get_client)
 ):
     """Import graph data into Neo4j database."""
     try:
-        logger.info(f"Importing graph data (clear={request.clear_database})")
-        # client.import_topology returns an ImportStats object
-        stats = client.import_topology(graph_data=request.graph_data, clear=request.clear_database)
-        
-        # Format expects the details dictionary directly wrapped
+        logger.info(f"Importing graph data (clear={req.clear_database})")
+        stats = await run_with_disconnect_watch(
+            raw_request,
+            lambda cancel_event: client.import_topology(
+                graph_data=req.graph_data, clear=req.clear_database
+            ),
+        )
         return graph_presenter.format_import_response(stats.to_dict())
-
+    except ClientDisconnected:
+        raise HTTPException(status_code=499, detail="Client disconnected; operation stopped")
     except Exception as e:
         logger.error(f"Graph import failed: {e}")
         raise HTTPException(status_code=500, detail=f"Graph import failed: {e}")
@@ -85,6 +99,7 @@ async def import_graph(
 
 @router.post("/generate-and-import", response_model=GraphGenerateImportResponse)
 async def generate_and_import_graph(
+    raw_request: Request,
     credentials: Neo4jCredentials,
     scale: str = Query(default="medium", description="Graph scale"),
     seed: int = Query(default=42, description="Random seed"),
@@ -96,18 +111,31 @@ async def generate_and_import_graph(
     """Convenience endpoint to generate and immediately import a graph."""
     try:
         logger.info(f"Generating and importing graph: scale={scale}, seed={seed}")
-        gen_service = GenerationService(scale=scale, seed=seed, domain=domain, scenario=scenario)
-        graph_data = gen_service.generate()
-        
-        client = Client(repo=repo)
-        import_result = client.import_topology(graph_data=graph_data, clear=clear_database)
-        
+
+        def _work(cancel_event):
+            gen_service = GenerationService(scale=scale, seed=seed, domain=domain, scenario=scenario)
+            if cancel_event.is_set():
+                return None
+            graph_data = gen_service.generate()
+            if cancel_event.is_set():
+                return None
+            client = Client(repo=repo)
+            import_result = client.import_topology(graph_data=graph_data, clear=clear_database)
+            return (graph_data, import_result)
+
+        result = await run_with_disconnect_watch(raw_request, _work)
+        if result is None:
+            raise ClientDisconnected()
+        graph_data, import_result = result
+
         return graph_presenter.format_generate_import_response(
-            graph_data, 
-            import_result.to_dict(), 
-            scale, 
+            graph_data,
+            import_result.to_dict(),
+            scale,
             seed
         )
+    except ClientDisconnected:
+        raise HTTPException(status_code=499, detail="Client disconnected; operation stopped")
     except Exception as e:
         logger.error(f"Generate and import failed: {e}")
         raise HTTPException(status_code=500, detail=f"Operation failed: {e}")

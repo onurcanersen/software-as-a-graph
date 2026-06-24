@@ -2,7 +2,7 @@
 Validation endpoints for criticality score validation.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import Field
 from typing import Dict, Any, List, Optional
 import logging
@@ -20,6 +20,7 @@ from saag.prediction.models import ProblemSummary
 from saag.simulation import SimulationService
 from saag.validation import ValidationService, ValidationTargets
 from saag import Client
+from api._cancellable_runner import run_with_disconnect_watch, ClientDisconnected
 
 router = APIRouter(prefix="/api/v1/validation", tags=["validation"])
 logger = logging.getLogger(__name__)
@@ -72,20 +73,9 @@ class QuickValidationRequest(GraphRequestWithCredentials):
 
 
 @router.post("/run-pipeline", response_model=Dict[str, Any])
-async def run_validation_pipeline(request: ValidationRequest):
+async def run_validation_pipeline(request: ValidationRequest, raw_request: Request):
     """
     Run the full validation pipeline.
-    
-    This endpoint orchestrates:
-    1. Graph analysis to get predicted criticality scores
-    2. Failure simulation to get actual impact scores
-    3. Statistical validation comparing predictions vs reality
-    
-    Args:
-        request: Validation configuration with credentials and layers
-        
-    Returns:
-        Complete validation results with metrics for each layer
     """
     repo = create_repository(
         uri=request.credentials.uri,
@@ -94,7 +84,7 @@ async def run_validation_pipeline(request: ValidationRequest):
     )
     try:
         logger.info(f"Starting validation pipeline for layers: {request.layers}")
-        
+
         safe_analysis = _SafeAnalysisService(repo)
         prediction_svc = PredictionService()
         simulation_svc = SimulationService(repo)
@@ -103,22 +93,22 @@ async def run_validation_pipeline(request: ValidationRequest):
             prediction_service=prediction_svc,
             simulation_service=simulation_svc,
         )
-        result = validation_svc.validate_layers(layers=request.layers)
-        
-        # Wrap in a minimal facade-compatible dict
-        
-        # Enhance layer results with missing 'data' field expected by frontend
+        result = await run_with_disconnect_watch(
+            raw_request,
+            lambda ce: validation_svc.validate_layers(layers=request.layers),
+        )
+        if result is None:
+            raise ClientDisconnected()
+
         enhanced_layers = {}
         for layer_key, original_layer in result.layers.items():
-            # Add the missing 'data' field
             enhanced_layer = original_layer.to_dict() if hasattr(original_layer, 'to_dict') else {}
             enhanced_layer["data"] = {
                 "predicted_components": original_layer.predicted_components,
                 "simulated_components": original_layer.simulated_components,
                 "matched_components": original_layer.matched_components,
             }
-            
-            # Ensure summary has all required fields
+
             if "summary" not in enhanced_layer:
                 enhanced_layer["summary"] = {}
             enhanced_layer["summary"].update({
@@ -130,10 +120,9 @@ async def run_validation_pipeline(request: ValidationRequest):
                 "top_5_overlap": round(original_layer.top_5_overlap, 4),
                 "rmse": round(original_layer.rmse, 4),
             })
-            
+
             enhanced_layers[layer_key] = enhanced_layer
-        
-        # Restructure response for frontend compatibility
+
         transformed_result = {
             "timestamp": result.timestamp,
             "summary": {
@@ -146,11 +135,13 @@ async def run_validation_pipeline(request: ValidationRequest):
             "cross_layer_insights": result.warnings,
             "targets": result.targets.to_dict() if result.targets else None,
         }
-        
+
         return {
             "success": True,
             "result": transformed_result
         }
+    except ClientDisconnected:
+        raise HTTPException(status_code=499, detail="Client disconnected; operation stopped")
     except Exception as e:
         logger.error(f"Validation pipeline failed: {str(e)}")
         logger.exception("Full traceback:")
@@ -163,22 +154,10 @@ async def run_validation_pipeline(request: ValidationRequest):
 
 
 @router.post("/quick", response_model=Dict[str, Any])
-async def quick_validation(request: QuickValidationRequest):
+async def quick_validation(request: QuickValidationRequest, raw_request: Request):
     """
     Quick validation from provided or file-based data.
-    
-    Compare predicted scores against actual scores using
-    statistical validation metrics without running the full pipeline.
-    
-    Args:
-        request: Predicted and actual scores (as files or data)
-        
-    Returns:
-        Validation metrics and results
     """
-    # Note: quick_validation is mostly standalone statistics.
-    # We still need a repo for create_repository if we want to follow the same pattern,
-    # but validate_from_data might not actually use it.
     repo = create_repository(
         uri=request.credentials.uri,
         user=request.credentials.user,
@@ -186,46 +165,51 @@ async def quick_validation(request: QuickValidationRequest):
     )
     try:
         logger.info("Starting quick validation")
-        
-        # Load data
+
         predicted_scores = {}
         actual_scores = {}
-        
+
         if request.predicted_data:
             predicted_scores = request.predicted_data
         elif request.predicted_file:
             with open(request.predicted_file, 'r') as f:
                 data = json.load(f)
                 predicted_scores = data if isinstance(data, dict) else {}
-        
+
         if request.actual_data:
             actual_scores = request.actual_data
         elif request.actual_file:
             with open(request.actual_file, 'r') as f:
                 data = json.load(f)
                 actual_scores = data if isinstance(data, dict) else {}
-        
+
         if not predicted_scores or not actual_scores:
             raise HTTPException(
                 status_code=400,
                 detail="Must provide either files or data for both predicted and actual scores"
             )
-        
+
         analysis_service = AnalysisService(repo)
         prediction_service = PredictionService()
         simulation_service = SimulationService(repo)
         validation_service = ValidationService(analysis_service, prediction_service, simulation_service, targets=ValidationTargets())
-        
-        # Run quick validation
-        result = validation_service.validate_from_data(
-            predicted=predicted_scores,
-            actual=actual_scores
+
+        result = await run_with_disconnect_watch(
+            raw_request,
+            lambda ce: validation_service.validate_from_data(
+                predicted=predicted_scores,
+                actual=actual_scores
+            ),
         )
-        
+        if result is None:
+            raise ClientDisconnected()
+
         return {
             "success": True,
             "result": result.to_dict()
         }
+    except ClientDisconnected:
+        raise HTTPException(status_code=499, detail="Client disconnected; operation stopped")
     except FileNotFoundError as e:
         logger.error(f"File not found: {str(e)}")
         raise HTTPException(

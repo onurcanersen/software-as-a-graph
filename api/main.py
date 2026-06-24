@@ -4,9 +4,23 @@ Distributed System Graph API
 FastAPI application exposing graph generation, import, analysis, and query capabilities.
 """
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    app.state.active_tasks: dict = {}
+    yield
+    for task_id, task in list(app.state.active_tasks.items()):
+        task.cancel()
+        task_id_ref = task_id
+    app.state.active_tasks.clear()
+
+
+logger = logging.getLogger(__name__)
 
 # Import routers
 from api.routers import (
@@ -27,13 +41,13 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
 app = FastAPI(
     title="Distributed System Graph API",
     description="API for generating, analyzing, and querying distributed system graphs",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan,
 )
 
 # Configure CORS to allow frontend access from any origin

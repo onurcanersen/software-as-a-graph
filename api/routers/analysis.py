@@ -2,7 +2,7 @@
 Analysis endpoints for system, type, and layer analysis.
 """
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from typing import Dict, Any, List
 import logging
 import time
@@ -19,6 +19,7 @@ from saag.analysis.antipattern_detector import AntiPatternDetector
 from saag.core.layers import AnalysisLayer
 from api.presenters import analysis_presenter
 from api.models import AnalysisEnvelope
+from api._cancellable_runner import run_with_disconnect_watch, ClientDisconnected
 
 router = APIRouter(prefix="/api/v1/analysis", tags=["analysis"])
 logger = logging.getLogger(__name__)
@@ -72,6 +73,7 @@ class _AnalysisLogCapture:
 
 @router.post("/full", response_model=AnalysisEnvelope)
 async def analyze_full_system(
+    raw_request: Request,
     client: Client = Depends(get_client)
 ):
     """
@@ -83,19 +85,25 @@ async def analyze_full_system(
     try:
         logger.info("Running full system analysis via MultiLayerAnalysisUseCase")
         from saag.usecases.multi_layer_analysis import MultiLayerAnalysisUseCase
-        
+
         use_case = MultiLayerAnalysisUseCase(client.repo)
-        res = use_case.execute(layers=["system"])
+        res = await run_with_disconnect_watch(
+            raw_request, lambda ce: use_case.execute(layers=["system"])
+        )
+        if res is None:
+            raise ClientDisconnected()
         layer_res = res.layers["system"]
-        
+
         analysis = SaagAnalysisResult(layer_res)
         prediction = SaagPredictionResult(layer_res.prediction or layer_res.quality)
-        
+
         return analysis_presenter.build_analysis_response(
             analysis,
             prediction,
             layer_res.problems,
         )
+    except ClientDisconnected:
+        raise HTTPException(status_code=499, detail="Client disconnected; operation stopped")
     except Exception as e:
         logger.error(f"Full analysis failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
@@ -104,6 +112,7 @@ async def analyze_full_system(
 @router.post("/type/{component_type}", response_model=AnalysisEnvelope)
 async def analyze_by_type(
     component_type: str,
+    raw_request: Request,
     client: Client = Depends(get_client),
 ):
     """
@@ -129,9 +138,13 @@ async def analyze_by_type(
         from saag.usecases.multi_layer_analysis import MultiLayerAnalysisUseCase
 
         use_case = MultiLayerAnalysisUseCase(client.repo)
-        res = use_case.execute(layers=["system"])
+        res = await run_with_disconnect_watch(
+            raw_request, lambda ce: use_case.execute(layers=["system"])
+        )
+        if res is None:
+            raise ClientDisconnected()
         layer_res = res.layers["system"]
-        
+
         analysis = SaagAnalysisResult(layer_res)
         prediction = SaagPredictionResult(layer_res.prediction or layer_res.quality)
 
@@ -144,6 +157,8 @@ async def analyze_by_type(
             component_type=normalized_type,
             logs=cap.records,
         )
+    except ClientDisconnected:
+        raise HTTPException(status_code=499, detail="Client disconnected; operation stopped")
     except Exception as e:
         logger.error(f"Type analysis failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
@@ -151,7 +166,8 @@ async def analyze_by_type(
 
 @router.post("/layer/{layer}", response_model=AnalysisEnvelope)
 async def analyze_layer(
-    layer: str, 
+    layer: str,
+    raw_request: Request,
     client: Client = Depends(get_client),
 ):
     """
@@ -169,19 +185,25 @@ async def analyze_layer(
     try:
         logger.info(f"Analyzing layer: {layer_canonical} (input: {layer})")
         from saag.usecases.multi_layer_analysis import MultiLayerAnalysisUseCase
-        
+
         use_case = MultiLayerAnalysisUseCase(client.repo)
-        res = use_case.execute(layers=[layer_canonical])
+        res = await run_with_disconnect_watch(
+            raw_request, lambda ce: use_case.execute(layers=[layer_canonical])
+        )
+        if res is None:
+            raise ClientDisconnected()
         layer_res = res.layers[layer_canonical]
-        
+
         analysis = SaagAnalysisResult(layer_res)
         prediction = SaagPredictionResult(layer_res.prediction or layer_res.quality)
-        
+
         return analysis_presenter.build_analysis_response(
             analysis,
             prediction,
             layer_res.problems,
         )
+    except ClientDisconnected:
+        raise HTTPException(status_code=499, detail="Client disconnected; operation stopped")
     except Exception as e:
         logger.error(f"Layer analysis failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")

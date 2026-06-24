@@ -3,9 +3,10 @@ Prediction endpoints: GNN training and inference.
 """
 
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional
 import asyncio
@@ -13,6 +14,7 @@ import logging
 
 from api.dependencies import get_client
 from saag import Client
+from api._cancellable_runner import run_with_disconnect_watch, ClientDisconnected
 
 router = APIRouter(prefix="/api/v1/graph/prediction", tags=["prediction"])
 logger = logging.getLogger(__name__)
@@ -250,6 +252,7 @@ async def list_checkpoints():
 @router.post("/train", response_model=TrainResponse)
 async def train_gnn(
     request: TrainRequest,
+    raw_request: Request,
     client: Client = Depends(get_client),
 ):
     """
@@ -264,17 +267,15 @@ async def train_gnn(
     except ImportError as e:
         raise HTTPException(status_code=501, detail=f"GNN module not available: {e}")
 
-    def _run_training():
+    def _run_training(cancel_event: threading.Event):
         import re
         raw_name = (request.checkpoint_name or "").strip()
-        # Sanitise: keep only alphanumeric, dashes, underscores, dots
         safe_name = re.sub(r"[^\w.\-]", "_", raw_name) if raw_name else ""
         folder_name = safe_name if safe_name else datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         ckpt_dir = _GNN_CHECKPOINTS_DIR / folder_name
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         logger.info("GNN training: layer=%s epochs=%d checkpoint_dir=%s", request.layer, request.epochs, ckpt_dir)
 
-        # Step 2+3: structural analysis + RMAV scores
         from saag.analysis.structural_analyzer import StructuralAnalyzer
         from saag.core.layers import AnalysisLayer
         graph_data = client.repo.get_graph_data()
@@ -292,17 +293,27 @@ async def train_gnn(
             )
         structural_dict = extract_structural_metrics_dict(struct_result)
 
+        if cancel_event.is_set():
+            return None
+        logger.info("GNN training: RMAV scores computed")
+
         from saag.prediction.service import PredictionService
         pred_svc = PredictionService(use_ahp=request.use_ahp)
         quality_result = pred_svc.predict_quality(struct_result)
         rmav_dict = extract_rmav_scores_dict(quality_result)
 
-        # Step 4: simulation ground truth
+        if cancel_event.is_set():
+            return None
+        logger.info("GNN training: running exhaustive failure simulation")
+
         sim_svc = SimulationService(client.repo)
         sim_results = sim_svc.run_failure_simulation_exhaustive(layer=request.layer)
         simulation_dict = extract_simulation_dict(sim_results)
 
-        # Train GNN
+        if cancel_event.is_set():
+            return None
+        logger.info("GNN training: starting GNN training loop")
+
         gnn_svc = GNNService(
             hidden_channels=request.hidden,
             num_heads=request.heads,
@@ -323,7 +334,6 @@ async def train_gnn(
             patience=request.patience,
         )
 
-        # Persist the layer into service_config.json so the predict page can read it
         cfg_path = ckpt_dir / "service_config.json"
         if cfg_path.exists():
             try:
@@ -337,7 +347,10 @@ async def train_gnn(
         return ckpt_dir, gnn_result, name_lookup
 
     try:
-        ckpt_dir, gnn_result, name_lookup = await asyncio.to_thread(_run_training)
+        result = await run_with_disconnect_watch(raw_request, _run_training)
+        if result is None:
+            raise ClientDisconnected()
+        ckpt_dir, gnn_result, name_lookup = result
 
         top_nodes = [_node_score_model(s, name_lookup) for s in gnn_result.top_critical_nodes(n=10)]
         top_edges = [_edge_score_model(e, name_lookup) for e in gnn_result.top_critical_edges(n=10)]
@@ -353,6 +366,8 @@ async def train_gnn(
             top_critical=top_nodes,
             top_critical_edges=top_edges,
         )
+    except ClientDisconnected:
+        raise HTTPException(status_code=499, detail="Client disconnected; operation stopped")
     except Exception as e:
         logger.error("GNN training failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Training failed: {e}")
@@ -391,6 +406,7 @@ async def delete_checkpoint(name: str):
 @router.post("/predict", response_model=PredictResponse)
 async def predict_gnn(
     request: PredictRequest,
+    raw_request: Request,
     client: Client = Depends(get_client),
 ):
     """
@@ -403,13 +419,11 @@ async def predict_gnn(
     except ImportError as e:
         raise HTTPException(status_code=501, detail=f"GNN module not available: {e}")
 
-    def _run_inference():
+    def _run_inference(cancel_event: threading.Event):
         logger.info("GNN inference: layer=%s checkpoint=%s", request.layer, request.checkpoint_dir)
 
-        # Resolve empty checkpoint_dir to default repo path
         ckpt_dir = request.checkpoint_dir.strip() or str(_GNN_CHECKPOINTS_DIR)
 
-        # Step 2+3: structural analysis + RMAV scores (needed for features AND metadata)
         from saag.analysis.structural_analyzer import StructuralAnalyzer
         from saag.core.layers import AnalysisLayer
         graph_data = client.repo.get_graph_data()
@@ -427,14 +441,20 @@ async def predict_gnn(
             )
         structural_dict = extract_structural_metrics_dict(struct_result)
 
+        if cancel_event.is_set():
+            return None
+        logger.info("GNN inference: RMAV scores computed")
+
         from saag.prediction.service import PredictionService
         pred_svc = PredictionService(use_ahp=False)
         quality_result = pred_svc.predict_quality(struct_result)
         rmav_dict = extract_rmav_scores_dict(quality_result)
 
-        # Load trained model — pass graph so from_checkpoint can reconstruct PyG metadata
-        gnn_svc = GNNService.from_checkpoint(ckpt_dir, graph=nx_graph)
+        if cancel_event.is_set():
+            return None
+        logger.info("GNN inference: loading checkpoint and running forward pass")
 
+        gnn_svc = GNNService.from_checkpoint(ckpt_dir, graph=nx_graph)
         gnn_result = gnn_svc.predict(
             graph=nx_graph,
             structural_metrics=structural_dict,
@@ -445,7 +465,10 @@ async def predict_gnn(
         return ckpt_dir, gnn_result, name_lookup
 
     try:
-        ckpt_dir, gnn_result, name_lookup = await asyncio.to_thread(_run_inference)
+        result = await run_with_disconnect_watch(raw_request, _run_inference)
+        if result is None:
+            raise ClientDisconnected()
+        ckpt_dir, gnn_result, name_lookup = result
 
         scores = [_node_score_model(s, name_lookup) for s in sorted(
             gnn_result.node_scores.values(),
@@ -462,6 +485,8 @@ async def predict_gnn(
             scores=scores,
             edge_scores=edge_scores,
         )
+    except ClientDisconnected:
+        raise HTTPException(status_code=499, detail="Client disconnected; operation stopped")
     except Exception as e:
         logger.error("GNN inference failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Prediction failed: {e}")
