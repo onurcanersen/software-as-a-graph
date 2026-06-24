@@ -14,7 +14,7 @@ import { apiClient } from "@/lib/api/client"
 import ReactECharts from "echarts-for-react"
 import {
   Activity, AlertTriangle, BarChart3, Layers, Network, Radio,
-  Shield, Box, Server, BookOpen, Zap, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Wifi,
+  Shield, Box, Server, BookOpen, Zap, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Wifi, X,
 } from "lucide-react"
 import { TermTooltip } from "@/components/ui/term-tooltip"
 import { ItemTooltip } from "@/components/ui/item-tooltip"
@@ -96,6 +96,8 @@ interface ExtrasStats {
     norm_ids: string[]
     norm_pubs: number[]
     norm_subs: number[]
+    crit_io: number[]
+    outliers: [string, number, number, number][]
     summary: SummaryDict
   }
   lib_dependency?: {
@@ -107,10 +109,14 @@ interface ExtrasStats {
     outliers: [string, number, number][]
   }
   node_critical_density?: {
+    node_ids: string[]
+    node_labels: string[]
     sorted_labels: string[]
     sorted_ids: string[]
     sorted_crit: number[]
     sorted_norm: number[]
+    crit_vals: number[]
+    norm_vals: number[]
     summary: SummaryDict
   }
   domain_diversity?: {
@@ -178,6 +184,19 @@ interface ExtrasStats {
     reliability: Record<string, number>
     transport_priority: Record<string, number>
   }
+}
+
+// ── Drill-down types ──────────────────────────────────────────────────
+interface DrillDownRow {
+  name: string
+  id?: string
+  cells: (string | number)[]
+}
+
+interface DrillDownConfig {
+  title: string
+  columns: string[]
+  rows: DrillDownRow[]
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -676,6 +695,194 @@ function StatCountCard({
   )
 }
 
+const DRILL_PAGE_SIZE = 20
+
+function DrillDownModal({
+  config,
+  onClose,
+}: {
+  config: DrillDownConfig
+  onClose: () => void
+}) {
+  const [search, setSearch] = useState("")
+  const [page, setPage] = useState(0)
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    return q
+      ? config.rows.filter((r) => r.name.toLowerCase().includes(q))
+      : config.rows
+  }, [config.rows, search])
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / DRILL_PAGE_SIZE))
+  const safePage = Math.min(page, totalPages - 1)
+  const pageRows = filtered.slice(
+    safePage * DRILL_PAGE_SIZE,
+    (safePage + 1) * DRILL_PAGE_SIZE,
+  )
+
+  const handleSearch = (v: string) => {
+    setSearch(v)
+    setPage(0)
+  }
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-background border border-border rounded-lg shadow-lg max-w-3xl w-full max-h-[85vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="px-4 py-3 border-b border-border flex items-center justify-between flex-shrink-0">
+          <div>
+            <h2 className="font-semibold text-sm">{config.title}</h2>
+            <p className="text-xs text-muted-foreground">
+              {filtered.length} item
+              {filtered.length !== 1 ? "s" : ""}
+              {search ? ` (filtered from ${config.rows.length})` : ""}
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="px-4 py-2 border-b border-border/50 flex items-center gap-2 flex-shrink-0">
+          <input
+            type="search"
+            placeholder="Search…"
+            value={search}
+            onChange={(e) => handleSearch(e.target.value)}
+            className="h-7 w-48 rounded-md border bg-background px-2 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
+            autoFocus
+          />
+          {totalPages > 1 && (
+            <div className="flex items-center gap-1 ml-auto">
+              <button onClick={() => setPage(0)} disabled={safePage === 0} className="h-6 w-6 text-xs rounded border disabled:opacity-30 hover:bg-muted transition-colors">«</button>
+              <button onClick={() => setPage(safePage - 1)} disabled={safePage === 0} className="h-6 w-6 text-xs rounded border disabled:opacity-30 hover:bg-muted transition-colors">‹</button>
+              <span className="text-xs px-1">{safePage + 1} / {totalPages}</span>
+              <button onClick={() => setPage(safePage + 1)} disabled={safePage >= totalPages - 1} className="h-6 w-6 text-xs rounded border disabled:opacity-30 hover:bg-muted transition-colors">›</button>
+              <button onClick={() => setPage(totalPages - 1)} disabled={safePage >= totalPages - 1} className="h-6 w-6 text-xs rounded border disabled:opacity-30 hover:bg-muted transition-colors">»</button>
+            </div>
+          )}
+        </div>
+
+        <div className="flex-1 min-h-0 overflow-auto">
+          {filtered.length === 0 ? (
+            <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">
+              No matching items
+            </div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-background border-b border-border">
+                <tr>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                    Name
+                  </th>
+                  {config.columns.map((col) => (
+                    <th
+                      key={col}
+                      className="px-3 py-2 text-right text-xs font-medium text-muted-foreground uppercase tracking-wide"
+                    >
+                      {col}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {pageRows.map((row, i) => (
+                  <tr
+                    key={row.id ?? `${row.name}-${i}`}
+                    className={`border-b border-border/50 hover:bg-muted/30 transition-colors ${row.id ? "cursor-pointer" : ""}`}
+                    onClick={() => row.id && goToExplorer(row.id)}
+                  >
+                    <td
+                      className="px-3 py-2 font-medium truncate max-w-[200px]"
+                      title={row.name}
+                    >
+                      {row.name}
+                    </td>
+                    {row.cells.map((cell, j) => (
+                      <td
+                        key={j}
+                        className="px-3 py-2 text-right font-mono text-xs text-muted-foreground"
+                      >
+                        {typeof cell === "number" ? fmtNum(cell) : cell}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        <div className="px-4 py-2 border-t border-border text-xs text-muted-foreground flex-shrink-0">
+          Click a row to open in Explorer
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function DrillableCountCard({
+  label,
+  value,
+  description,
+  formula,
+  onClick,
+  disabled,
+}: {
+  label: string
+  value: number | string
+  description: string
+  formula?: string
+  onClick: () => void
+  disabled?: boolean
+}) {
+  const isDisabled = disabled ?? false
+
+  return (
+    <div
+      onClick={!isDisabled ? onClick : undefined}
+      className={`rounded-lg border bg-background p-4 shadow-sm flex flex-col justify-between h-full ${
+        isDisabled
+          ? "opacity-50 cursor-not-allowed"
+          : "hover:shadow-md hover:border-primary/40 cursor-pointer transition-all active:scale-[0.98]"
+      }`}
+    >
+      <div>
+        <p className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-3 border-b border-border pb-2">
+          {label}
+        </p>
+        <p className="text-3xl font-bold text-foreground mb-3">
+          {typeof value === "number" ? fmtNum(value) : value}
+        </p>
+      </div>
+      <div>
+        <p className="text-xs text-muted-foreground leading-relaxed mb-1">
+          {description}
+        </p>
+        {formula && (
+          <code className="text-[10px] font-mono bg-muted/80 rounded px-2 py-0.5 text-muted-foreground/90 inline-block">
+            {formula}
+          </code>
+        )}
+        {!isDisabled && (
+          <p className="text-[10px] text-primary/70 mt-1.5 font-medium">
+            Click to drill down →
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ── Sections ────────────────────────────────────────────────────────────
 
 type BandwidthMode = "sub" | "pub" | "pubsub"
@@ -688,6 +895,7 @@ const BANDWIDTH_MODE_CONFIG: Record<BandwidthMode, { label: string; multiplierLa
 
 function TopicBandwidthSection({ data }: { data: ExtrasStats["topic_bandwidth"] }) {
   const [mode, setMode] = useState<BandwidthMode>("pubsub")
+  const [drill, setDrill] = useState<DrillDownConfig | null>(null)
 
   const bwArray = mode === "pub" ? (data?.bandwidth_pub ?? data?.bandwidth ?? [])
                 : mode === "pubsub" ? (data?.bandwidth_pubsub ?? data?.bandwidth ?? [])
@@ -702,6 +910,16 @@ function TopicBandwidthSection({ data }: { data: ExtrasStats["topic_bandwidth"] 
   })).sort((a, b) => b.bandwidth - a.bandwidth), [data, mode]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const { search, handleSearch, filtered } = useFilteredSearch(allItems)
+
+  // Drill-down: bandwidth outlier topics
+  const outlierBwItems = useMemo<DrillDownRow[]>(() => {
+    if (!data || !data.outlier_indices?.length) return []
+    return data.outlier_indices.map((i) => ({
+      name: data.labels[i],
+      id: data.ids?.[i],
+      cells: [data.sizes[i], data.pubs[i], data.subs[i], data.bandwidth[i]],
+    }))
+  }, [data])
 
   if (!data) return null
   const cfg = BANDWIDTH_MODE_CONFIG[mode]
@@ -739,10 +957,15 @@ function TopicBandwidthSection({ data }: { data: ExtrasStats["topic_bandwidth"] 
           description={mode === "pub" ? "Total bytes per publish event produced by publishers." : mode === "pubsub" ? "Total bytes per publish event flowing through the topic." : "Total bytes per publish event consumed by subscribers."}
           formula={mode === "pub" ? "size × pub_count" : mode === "pubsub" ? "size × (pub_count + sub_count)" : "size × sub_count"}
         />
-        <StatCountCard
+        <DrillableCountCard
           label="Outliers"
           value={data.summary.outlier_count ?? 0}
           description="Topics whose bandwidth exceeds the IQR upper fence (Q3 + 1.5 × IQR)."
+          onClick={() => setDrill({
+            title: "Bandwidth Outliers",
+            columns: ["Size (B)", "Publishers", "Subscribers", "Bandwidth (B/s)"],
+            rows: outlierBwItems
+          })}
         />
       </div>
       <Card className="bg-background pb-3">
@@ -794,6 +1017,8 @@ function TopicBandwidthSection({ data }: { data: ExtrasStats["topic_bandwidth"] 
           ])}
         />
       )}
+
+      {drill && <DrillDownModal config={drill} onClose={() => setDrill(null)} />}
     </div>
   )
 }
@@ -802,6 +1027,7 @@ type AppBalanceMode = "pubsub" | "pub" | "sub"
 
 function AppBalanceSection({ data }: { data: ExtrasStats["app_balance"] }) {
   const [mode, setMode] = useState<AppBalanceMode>("pubsub")
+  const [drill, setDrill] = useState<DrillDownConfig | null>(null)
 
   const allItems = useMemo(() => (!data ? [] : data.labels.map((label, i) => ({
     name: label,
@@ -816,6 +1042,58 @@ function AppBalanceSection({ data }: { data: ExtrasStats["app_balance"] }) {
   })), [data, mode]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const { search, handleSearch, filtered } = useFilteredSearch(allItems)
+
+  const highIoItems = useMemo<DrillDownRow[]>(() => {
+    if (!data) return []
+    const meanPub = Number(data.summary.pub_mean ?? 0)
+    const meanSub = Number(data.summary.sub_mean ?? 0)
+    return data.labels
+      .map((label, i) => ({ label, id: data.ids?.[i], pub: data.pubs[i], sub: data.subs[i] }))
+      .filter((it) => it.pub > meanPub && it.sub > meanSub)
+      .sort((a, b) => (b.pub + b.sub) - (a.pub + a.sub))
+      .map((it) => ({ name: it.label, id: it.id, cells: [it.pub, it.sub, it.pub + it.sub] }))
+  }, [data])
+
+  const consumerItems = useMemo<DrillDownRow[]>(() => {
+    if (!data) return []
+    const meanPub = Number(data.summary.pub_mean ?? 0)
+    const meanSub = Number(data.summary.sub_mean ?? 0)
+    return data.labels
+      .map((label, i) => ({ label, id: data.ids?.[i], pub: data.pubs[i], sub: data.subs[i] }))
+      .filter((it) => it.pub <= meanPub && it.sub > meanSub)
+      .sort((a, b) => b.sub - a.sub)
+      .map((it) => ({ name: it.label, id: it.id, cells: [it.pub, it.sub, it.pub + it.sub] }))
+  }, [data])
+
+  const producerItems = useMemo<DrillDownRow[]>(() => {
+    if (!data) return []
+    const meanPub = Number(data.summary.pub_mean ?? 0)
+    const meanSub = Number(data.summary.sub_mean ?? 0)
+    return data.labels
+      .map((label, i) => ({ label, id: data.ids?.[i], pub: data.pubs[i], sub: data.subs[i] }))
+      .filter((it) => it.pub > meanPub && it.sub <= meanSub)
+      .sort((a, b) => b.pub - a.pub)
+      .map((it) => ({ name: it.label, id: it.id, cells: [it.pub, it.sub, it.pub + it.sub] }))
+  }, [data])
+
+  const lowActivityItems = useMemo<DrillDownRow[]>(() => {
+    if (!data) return []
+    const meanPub = Number(data.summary.pub_mean ?? 0)
+    const meanSub = Number(data.summary.sub_mean ?? 0)
+    return data.labels
+      .map((label, i) => ({ label, id: data.ids?.[i], pub: data.pubs[i], sub: data.subs[i] }))
+      .filter((it) => it.pub <= meanPub && it.sub <= meanSub && (it.pub > 0 || it.sub > 0))
+      .sort((a, b) => (b.pub + b.sub) - (a.pub + a.sub))
+      .map((it) => ({ name: it.label, id: it.id, cells: [it.pub, it.sub, it.pub + it.sub] }))
+  }, [data])
+
+  const zeroActivityItems = useMemo<DrillDownRow[]>(() => {
+    if (!data) return []
+    return data.labels
+      .map((label, i) => ({ label, id: data.ids?.[i], pub: data.pubs[i], sub: data.subs[i] }))
+      .filter((it) => it.pub === 0 && it.sub === 0)
+      .map((it) => ({ name: it.label, id: it.id, cells: [it.pub, it.sub] }))
+  }, [data])
 
   if (!data) return null
 
@@ -851,11 +1129,41 @@ function AppBalanceSection({ data }: { data: ExtrasStats["app_balance"] }) {
       </div>
       <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
         <StatCountCard label="Total Apps" value={data.summary.total_apps ?? 0} description="Total number of applications registered in the system topology." formula="count(applications)" />
-        <StatCountCard label="High I/O" value={data.summary.q_high_io ?? 0} description="Busiest communication hubs that publish and subscribe above average. Their failure disrupts both upstream and downstream flows." formula="pub > avg_pub AND sub > avg_sub" />
-        <StatCountCard label="Consumers" value={data.summary.q_consumer ?? 0} description="Pure data sinks that subscribe above average but publish below average. Upstream failures cascade directly into these endpoints." formula="pub ≤ avg_pub AND sub > avg_sub" />
-        <StatCountCard label="Producers" value={data.summary.q_producer ?? 0} description="Primary data sources that publish above average but subscribe below average. Their failure causes downstream data loss." formula="pub > avg_pub AND sub ≤ avg_sub" />
-        <StatCountCard label="Low Activity" value={data.summary.q_low ?? 0} description="Applications with connection counts at or below the system mean, contributing minimally to overall message flow." formula="pub ≤ avg_pub AND sub ≤ avg_sub" />
-        <StatCountCard label="Zero Activity" value={data.summary.zero_activity ?? 0} description="Applications with no publish or subscribe connections, potentially indicating stale or misconfigured components." formula="pub = 0 AND sub = 0" />
+        <DrillableCountCard
+          label="High I/O"
+          value={data.summary.q_high_io ?? 0}
+          description="Busiest communication hubs that publish and subscribe above average. Their failure disrupts both upstream and downstream flows."
+          formula="pub > avg_pub AND sub > avg_sub"
+          onClick={() => setDrill({ title: "High I/O Applications", columns: ["Publishes", "Subscribes", "I/O Load"], rows: highIoItems })}
+        />
+        <DrillableCountCard
+          label="Consumers"
+          value={data.summary.q_consumer ?? 0}
+          description="Pure data sinks that subscribe above average but publish below average. Upstream failures cascade directly into these endpoints."
+          formula="pub ≤ avg_pub AND sub > avg_sub"
+          onClick={() => setDrill({ title: "Consumer Applications", columns: ["Publishes", "Subscribes", "I/O Load"], rows: consumerItems })}
+        />
+        <DrillableCountCard
+          label="Producers"
+          value={data.summary.q_producer ?? 0}
+          description="Primary data sources that publish above average but subscribe below average. Their failure causes downstream data loss."
+          formula="pub > avg_pub AND sub ≤ avg_sub"
+          onClick={() => setDrill({ title: "Producer Applications", columns: ["Publishes", "Subscribes", "I/O Load"], rows: producerItems })}
+        />
+        <DrillableCountCard
+          label="Low Activity"
+          value={data.summary.q_low ?? 0}
+          description="Applications with connection counts at or below the system mean, contributing minimally to overall message flow."
+          formula="pub ≤ avg_pub AND sub ≤ avg_sub"
+          onClick={() => setDrill({ title: "Low Activity Applications", columns: ["Publishes", "Subscribes", "I/O Load"], rows: lowActivityItems })}
+        />
+        <DrillableCountCard
+          label="Zero Activity"
+          value={data.summary.zero_activity ?? 0}
+          description="Applications with no publish or subscribe connections, potentially indicating stale or misconfigured components."
+          formula="pub = 0 AND sub = 0"
+          onClick={() => setDrill({ title: "Zero Activity Applications", columns: ["Publishes", "Subscribes"], rows: zeroActivityItems })}
+        />
       </div>
       <Card className="bg-background pb-3">
         <CardHeader>
@@ -909,13 +1217,17 @@ function AppBalanceSection({ data }: { data: ExtrasStats["app_balance"] }) {
             data.subs[i],
             data.io_load[i],
           ])}
-        />
+         />
       )}
+
+      {drill && <DrillDownModal config={drill} onClose={() => setDrill(null)} />}
     </div>
   )
 }
 
 function TopicFanoutSection({ data }: { data: ExtrasStats["topic_fanout"] }) {
+  const [drill, setDrill] = useState<DrillDownConfig | null>(null)
+
   const allItems = useMemo(() => (!data ? [] : data.labels.map((label, i) => ({
     name: label,
     id: data.ids?.[i],
@@ -923,6 +1235,42 @@ function TopicFanoutSection({ data }: { data: ExtrasStats["topic_fanout"] }) {
   })).sort((a, b) => b.fanout - a.fanout)), [data])
 
   const { search, handleSearch, filtered } = useFilteredSearch(allItems)
+
+  const broadcastItems = useMemo<DrillDownRow[]>(() =>
+    !data ? [] : data.labels
+      .map((label, i) => ({ label, id: data.ids?.[i], pub: data.pubs[i], sub: data.subs[i], fanout: data.fanout[i] }))
+      .filter((it) => it.pub === 1 && it.sub > 1)
+      .sort((a, b) => b.sub - a.sub)
+      .map((it) => ({ name: it.label, id: it.id, cells: [it.pub, it.sub, it.fanout] })),
+    [data],
+  )
+
+  const aggregatorItems = useMemo<DrillDownRow[]>(() =>
+    !data ? [] : data.labels
+      .map((label, i) => ({ label, id: data.ids?.[i], pub: data.pubs[i], sub: data.subs[i], fanout: data.fanout[i] }))
+      .filter((it) => it.pub > 1 && it.sub === 1)
+      .sort((a, b) => b.pub - a.pub)
+      .map((it) => ({ name: it.label, id: it.id, cells: [it.pub, it.sub, it.fanout] })),
+    [data],
+  )
+
+  const meshItems = useMemo<DrillDownRow[]>(() =>
+    !data ? [] : data.labels
+      .map((label, i) => ({ label, id: data.ids?.[i], pub: data.pubs[i], sub: data.subs[i], fanout: data.fanout[i] }))
+      .filter((it) => it.pub > 1 && it.sub > 1)
+      .sort((a, b) => b.fanout - a.fanout)
+      .map((it) => ({ name: it.label, id: it.id, cells: [it.pub, it.sub, it.fanout] })),
+    [data],
+  )
+
+  const orphanItems = useMemo<DrillDownRow[]>(() =>
+    !data ? [] : data.labels
+      .map((label, i) => ({ label, id: data.ids?.[i], pub: data.pubs[i], sub: data.subs[i] }))
+      .filter((it) => it.pub === 0 || it.sub === 0)
+      .sort((a, b) => (b.pub + b.sub) - (a.pub + a.sub))
+      .map((it) => ({ name: it.label, id: it.id, cells: [it.pub, it.sub, it.pub * it.sub] })),
+    [data],
+  )
 
   if (!data) return null
 
@@ -958,10 +1306,34 @@ function TopicFanoutSection({ data }: { data: ExtrasStats["topic_fanout"] }) {
       </div>
       <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
         <StatCountCard label="Total Topics" value={data.summary.total_topics ?? 0} description="Total number of topics in the system." formula="count(topics)" />
-        <StatCountCard label="1→N (Broadcast)" value={data.summary.one_to_many ?? 0} description="Single publisher, multiple subscribers. Publisher failure silences all downstream consumers." formula="pub = 1 AND sub > 1" />
-        <StatCountCard label="N→1 (Aggregator)" value={data.summary.many_to_one ?? 0} description="Multiple publishers, single subscriber. Common in data aggregation or logging patterns." formula="pub > 1 AND sub = 1" />
-        <StatCountCard label="N→N (Mesh)" value={data.summary.many_to_many ?? 0} description="Multiple publishers and multiple subscribers. Highly interconnected communication patterns." formula="pub > 1 AND sub > 1" />
-        <StatCountCard label="Orphan" value={data.summary.orphan ?? 0} description="Topics missing a publisher or subscriber, indicating incomplete message flows." formula="pub = 0 OR sub = 0" />
+        <DrillableCountCard
+          label="1→N (Broadcast)"
+          value={data.summary.one_to_many ?? 0}
+          description="Single publisher, multiple subscribers. Publisher failure silences all downstream consumers."
+          formula="pub = 1 AND sub > 1"
+          onClick={() => setDrill({ title: "1→N Broadcast Topics", columns: ["Publishers", "Subscribers", "Fanout"], rows: broadcastItems })}
+        />
+        <DrillableCountCard
+          label="N→1 (Aggregator)"
+          value={data.summary.many_to_one ?? 0}
+          description="Multiple publishers, single subscriber. Common in data aggregation or logging patterns."
+          formula="pub > 1 AND sub = 1"
+          onClick={() => setDrill({ title: "N→1 Aggregator Topics", columns: ["Publishers", "Subscribers", "Fanout"], rows: aggregatorItems })}
+        />
+        <DrillableCountCard
+          label="N→N (Mesh)"
+          value={data.summary.many_to_many ?? 0}
+          description="Multiple publishers and multiple subscribers. Highly interconnected communication patterns."
+          formula="pub > 1 AND sub > 1"
+          onClick={() => setDrill({ title: "N→N Mesh Topics", columns: ["Publishers", "Subscribers", "Fanout"], rows: meshItems })}
+        />
+        <DrillableCountCard
+          label="Orphan"
+          value={data.summary.orphan ?? 0}
+          description="Topics missing a publisher or subscriber, indicating incomplete message flows."
+          formula="pub = 0 OR sub = 0"
+          onClick={() => setDrill({ title: "Orphan Topics", columns: ["Publishers", "Subscribers", "Fanout"], rows: orphanItems })}
+        />
       </div>
       <Card className="bg-background pb-3">
         <CardHeader>
@@ -990,6 +1362,8 @@ function TopicFanoutSection({ data }: { data: ExtrasStats["topic_fanout"] }) {
           ])}
         />
       )}
+
+      {drill && <DrillDownModal config={drill} onClose={() => setDrill(null)} />}
     </div>
   )
 }
@@ -1273,6 +1647,7 @@ type NodeLoadMode = "pubsub" | "pub" | "sub"
 
 function NodeCommLoadSection({ data }: { data: ExtrasStats["node_comm_load"] }) {
   const [mode, setMode] = useState<NodeLoadMode>("pubsub")
+  const [drill, setDrill] = useState<DrillDownConfig | null>(null)
 
   const allItems = useMemo(() => (!data ? [] : data.sorted_labels.map((label, i) => ({
     name: label,
@@ -1287,6 +1662,21 @@ function NodeCommLoadSection({ data }: { data: ExtrasStats["node_comm_load"] }) 
   })), [data, mode]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const { search, handleSearch, filtered } = useFilteredSearch(allItems)
+
+  // Drill-down: zero-load nodes
+  const zeroLoadItems = useMemo<DrillDownRow[]>(() => {
+    if (!data) return []
+    return data.all_totals
+      .map((io, i) => ({ label: data.sorted_labels[i], id: data.sorted_ids?.[i], io, pub: data.sorted_pub[i], sub: data.sorted_sub[i] }))
+      .filter((it) => it.io === 0)
+      .map((it) => ({ name: it.label, id: it.id, cells: [it.pub, it.sub, 0] }))
+  }, [data])
+
+  // Drill-down: outlier nodes (use existing outliers array: [label, pub, sub, total, deviation])
+  const outlierNodeItems = useMemo<DrillDownRow[]>(() => {
+    if (!data || !data.outliers.length) return []
+    return data.outliers.map(([label, pub, sub, total, dev]) => ({ name: label, cells: [pub, sub, total, Number(dev).toFixed(2)] }))
+  }, [data])
 
   if (!data) return null
 
@@ -1304,8 +1694,8 @@ function NodeCommLoadSection({ data }: { data: ExtrasStats["node_comm_load"] }) 
         <StatCountCard label="Total Pub" value={data.summary.pub_total ?? 0} description="Aggregate number of publish connections across all nodes." formula="Σ pub_count" />
         <StatCountCard label="Total Sub" value={data.summary.sub_total ?? 0} description="Aggregate number of subscribe connections across all nodes." formula="Σ sub_count" />
         <StatCountCard label="Load Variation (CV)" value={`${Number(data.summary.cv ?? 0).toFixed(1)}%`} description="Coefficient of variation. High CV means uneven workload distribution across hosts." formula="std(load) / mean(load) × 100" />
-        <StatCountCard label="Zero Load" value={data.summary.zero_load ?? 0} description="Nodes hosting no communicating applications, potentially indicating orphaned infrastructure." formula="count(load = 0)" />
-        <StatCountCard label="Outliers" value={data.summary.outlier_count ?? 0} description="Nodes whose total load exceeds the IQR upper fence." formula="load > Q3 + 1.5 × IQR" />
+        <DrillableCountCard label="Zero Load" value={data.summary.zero_load ?? 0} description="Nodes hosting no communicating applications, potentially indicating orphaned infrastructure." formula="count(load = 0)" onClick={() => setDrill({ title: "Zero-Load Nodes", columns: ["Publishes", "Subscribes", "Total"], rows: zeroLoadItems })} />
+        <DrillableCountCard label="Outliers" value={data.summary.outlier_count ?? 0} description="Nodes whose total load exceeds the IQR upper fence." formula="load > Q3 + 1.5 × IQR" onClick={() => setDrill({ title: "Outlier Nodes", columns: ["Publishes", "Subscribes", "Total", "Deviation"], rows: outlierNodeItems })} />
       </div>
       <Card className="bg-background pb-3">
         <CardHeader>
@@ -1352,11 +1742,15 @@ function NodeCommLoadSection({ data }: { data: ExtrasStats["node_comm_load"] }) 
       {data.outliers.length > 0 && (
         <OutlierTable title="Outlier Nodes" headers={["Node", "Pub", "Sub", "Total", "Deviation"]} rows={data.outliers} />
       )}
+
+      {drill && <DrillDownModal config={drill} onClose={() => setDrill(null)} />}
     </div>
   )
 }
 
 function CriticalityIOSection({ data }: { data: ExtrasStats["criticality_io"] }) {
+  const [drill, setDrill] = useState<DrillDownConfig | null>(null)
+
   const allItems = useMemo(() => (!data ? [] : data.crit_labels.map((label, i) => ({
     name: label,
     id: data.crit_ids?.[i],
@@ -1365,6 +1759,25 @@ function CriticalityIOSection({ data }: { data: ExtrasStats["criticality_io"] })
   })).sort((a, b) => (b.publishes + b.subscribes) - (a.publishes + a.subscribes))), [data])
 
   const { search, handleSearch, filtered } = useFilteredSearch(allItems)
+
+  // Drill-down: all critical apps
+  const criticalAppsItems = useMemo<DrillDownRow[]>(() =>
+    allItems.map((it) => ({
+      name: it.name,
+      id: it.id,
+      cells: [it.publishes, it.subscribes, it.publishes + it.subscribes],
+    })),
+    [allItems],
+  )
+
+  // Drill-down: outlier critical apps (from outliers array: [label, pub, sub, io])
+  const outlierItems = useMemo<DrillDownRow[]>(() => {
+    if (!data || !data.outliers.length) return []
+    return data.outliers.map(([label, p, s, io]) => ({
+      name: label,
+      cells: [p, s, io],
+    }))
+  }, [data])
 
   if (!data) return null
 
@@ -1386,10 +1799,22 @@ function CriticalityIOSection({ data }: { data: ExtrasStats["criticality_io"] })
           formula="pub + sub for normal apps"
         />
         <StatCountCard label="Total Apps" value={data.summary.total_apps ?? 0} description="Total number of applications in the system." formula="count(apps)" />
-        <StatCountCard label="Critical" value={data.summary.crit_count ?? 0} description="Applications flagged as mission-critical." formula="count(critical = true)" />
+        <DrillableCountCard
+          label="Critical"
+          value={data.summary.crit_count ?? 0}
+          description="Applications flagged as mission-critical."
+          formula="count(critical = true)"
+          onClick={() => setDrill({ title: "Critical Applications", columns: ["Publishes", "Subscribes", "I/O Load"], rows: criticalAppsItems })}
+        />
         <StatCountCard label="Critical %" value={`${Number(data.summary.crit_pct ?? 0).toFixed(1)}%`} description="Share of applications flagged as mission-critical. Higher fraction reduces fault-tolerance margin." formula="critical_apps / total_apps × 100" />
         <StatCountCard label="Crit/Normal Ratio" value={Number(data.summary.crit_norm_ratio ?? 0).toFixed(2)} description="How much heavier critical apps' average I/O load is compared to normal apps." formula="mean_io(critical) / mean_io(normal)" />
-        <StatCountCard label="Outliers" value={data.summary.outlier_count ?? 0} description="Critical applications whose I/O load exceeds the IQR upper fence." formula="io > Q3 + 1.5 × IQR" />
+        <DrillableCountCard
+          label="Outliers"
+          value={data.summary.outlier_count ?? 0}
+          description="Critical applications whose I/O load exceeds the IQR upper fence."
+          formula="io > Q3 + 1.5 × IQR"
+          onClick={() => setDrill({ title: "Critical I/O Outliers", columns: ["Publishes", "Subscribes", "I/O Load"], rows: outlierItems })}
+        />
       </div>
       {allItems.length > 0 && (
         <Card className="bg-background pb-3">
@@ -1418,11 +1843,15 @@ function CriticalityIOSection({ data }: { data: ExtrasStats["criticality_io"] })
           rows={data.outliers.map(([label, p, s, io]) => [label, p, s, io])}
         />
       )}
+
+      {drill && <DrillDownModal config={drill} onClose={() => setDrill(null)} />}
     </div>
   )
 }
 
 function LibDependencySection({ data }: { data: ExtrasStats["lib_dependency"] }) {
+  const [drill, setDrill] = useState<DrillDownConfig | null>(null)
+
   const allItems = useMemo(() => (!data ? [] : data.labels.map((label, i) => ({
     name: label,
     id: data.display_ids?.[i],
@@ -1433,6 +1862,12 @@ function LibDependencySection({ data }: { data: ExtrasStats["lib_dependency"] })
   const { search, handleSearch, filtered } = useFilteredSearch(allItems)
 
   if (!data || !data.labels.length) return <p className="text-sm text-muted-foreground">No library dependency data</p>
+
+  // Drill-down: outlier entities (from outliers array: [name, in, out])
+  const outlierLibItems = useMemo<DrillDownRow[]>(() => {
+    if (!data || !data.outliers.length) return []
+    return data.outliers.map(row => ({ name: row[0], cells: [row[1], row[2]] }))
+  }, [data])
 
   return (
     <div className="space-y-4">
@@ -1455,7 +1890,17 @@ function LibDependencySection({ data }: { data: ExtrasStats["lib_dependency"] })
         <StatCountCard label="Active Entities" value={data.summary.active_count ?? 0} description="Total number of apps and libraries involved in dependencies." formula="count(apps + libs with degree > 0)" />
         <StatCountCard label="Apps" value={data.summary.app_count ?? 0} description="Number of applications with library dependencies." formula="count(apps)" />
         <StatCountCard label="Libraries" value={data.summary.lib_count ?? 0} description="Number of libraries depended upon by applications." formula="count(libs)" />
-        <StatCountCard label="Outliers" value={data.summary.outlier_count ?? 0} description="Libraries whose in-degree exceeds the IQR upper fence." formula="in_degree > Q3 + 1.5 × IQR" />
+        <DrillableCountCard
+          label="Outliers"
+          value={data.summary.outlier_count ?? 0}
+          description="Libraries whose in-degree exceeds the IQR upper fence."
+          formula="in_degree > Q3 + 1.5 × IQR"
+          onClick={() => setDrill({
+            title: "High-Dependency Outliers",
+            columns: ["In-Degree", "Out-Degree"],
+            rows: outlierLibItems
+          })}
+        />
       </div>
       <Card className="bg-background pb-3">
         <CardHeader>
@@ -1478,11 +1923,15 @@ function LibDependencySection({ data }: { data: ExtrasStats["lib_dependency"] })
       {data.outliers.length > 0 && (
         <OutlierTable title="High-Dependency Outliers" headers={["Entity", "In-degree", "Out-degree"]} rows={data.outliers} />
       )}
+
+      {drill && <DrillDownModal config={drill} onClose={() => setDrill(null)} />}
     </div>
   )
 }
 
 function NodeCriticalDensitySection({ data }: { data: ExtrasStats["node_critical_density"] }) {
+  const [drill, setDrill] = useState<DrillDownConfig | null>(null)
+
   const allItems = useMemo(() => (!data ? [] : data.sorted_labels.map((label, i) => ({
     name: label,
     id: data.sorted_ids?.[i],
@@ -1493,6 +1942,15 @@ function NodeCriticalDensitySection({ data }: { data: ExtrasStats["node_critical
   const { search, handleSearch, filtered } = useFilteredSearch(allItems)
 
   if (!data) return null
+
+  // Drill-down: nodes with zero critical apps
+  const noCriticalAppsItems = useMemo<DrillDownRow[]>(() => {
+    if (!data) return []
+    return data.node_labels
+      .map((label, i) => ({ label, id: data.node_ids?.[i], critical: data.crit_vals[i], normal: data.norm_vals[i] }))
+      .filter((it) => it.critical === 0)
+      .map((it) => ({ name: it.label, id: it.id, cells: [it.critical, it.normal] }))
+  }, [data])
 
   return (
     <div className="space-y-4">
@@ -1515,7 +1973,17 @@ function NodeCriticalDensitySection({ data }: { data: ExtrasStats["node_critical
         <StatCountCard label="Total Critical" value={data.summary.total_crit ?? 0} description="Total number of critical applications across all nodes." formula="Σ critical_count" />
         <StatCountCard label="Total Normal" value={data.summary.total_norm ?? 0} description="Total number of non-critical applications across all nodes." formula="Σ normal_count" />
         <StatCountCard label="System Critical %" value={`${Number(data.summary.system_crit_pct ?? 0).toFixed(1)}%`} description="Percentage of all applications marked critical. High values reduce redundancy headroom." formula="total_crit / total_all × 100" />
-        <StatCountCard label="No Critical" value={data.summary.zero_crit ?? 0} description="Physical nodes hosting no critical applications, having lower individual failure impact." formula="count(critical_count = 0)" />
+        <DrillableCountCard
+          label="No Critical"
+          value={data.summary.zero_crit ?? 0}
+          description="Physical nodes hosting no critical applications, having lower individual failure impact."
+          formula="count(critical_count = 0)"
+          onClick={() => setDrill({
+            title: "Nodes With No Critical Applications",
+            columns: ["Critical Count", "Normal Count"],
+            rows: noCriticalAppsItems
+          })}
+        />
       </div>
       <Card className="bg-background pb-3">
         <CardHeader>
@@ -1535,6 +2003,8 @@ function NodeCriticalDensitySection({ data }: { data: ExtrasStats["node_critical
           />
         </CardContent>
       </Card>
+
+      {drill && <DrillDownModal config={drill} onClose={() => setDrill(null)} />}
     </div>
   )
 }
@@ -1610,6 +2080,7 @@ function NetworkUsageSection({ data }: { data: ExtrasStats["network_usage"] }) {
   const [mode, setMode] = useState<NetworkUsageMode>("total")
   const [tablePage, setTablePage] = useState(0)
   const [networkCapacityMbps, setNetworkCapacityMbps] = useState<number>(1000)
+  const [drill, setDrill] = useState<DrillDownConfig | null>(null)
 
   const nodeItems = useMemo(() => (!data ? [] : data.sorted_labels.map((label, i) => ({
     name: label,
@@ -1670,6 +2141,24 @@ function NetworkUsageSection({ data }: { data: ExtrasStats["network_usage"] }) {
   const capacityMbps = networkCapacityMbps
   const utilPct = capacityMbps > 0 ? Math.min((totalBwMbps / capacityMbps) * 100, 100) : 0
   const gaugeColor = utilPct > 85 ? "#ef4444" : utilPct > 60 ? "#f97316" : "#22c55e"
+
+  // Drill-down: zero-bandwidth nodes
+  const zeroBwNodeItems = useMemo<DrillDownRow[]>(() => {
+    if (!data) return []
+    return data.sorted_labels
+      .map((label, i) => ({ label, id: data.sorted_ids?.[i], out: data.sorted_out[i], in: data.sorted_in[i], total: data.sorted_total[i] }))
+      .filter((it) => it.total === 0)
+      .map((it) => ({ name: it.label, id: it.id, cells: [fmtBytes(it.out) + "/s", fmtBytes(it.in) + "/s", "0 B/s"] }))
+  }, [data])
+
+  // Drill-down: outlier nodes (from outliers array: [label, out, in, total])
+  const outlierBwNodeItems = useMemo<DrillDownRow[]>(() => {
+    if (!data || !data.outliers.length) return []
+    return data.outliers.map(([label, out, inn, tot]) => ({
+      name: label,
+      cells: [fmtBytes(out) + "/s", fmtBytes(inn) + "/s", fmtBytes(tot) + "/s"],
+    }))
+  }, [data])
 
   const netGaugeOption = {
     series: [{
@@ -1739,8 +2228,20 @@ function NetworkUsageSection({ data }: { data: ExtrasStats["network_usage"] }) {
         <StatCountCard label="Total Inbound" value={fmtBytes(totalIn) + "/s"} description="Sustained bytes per second consumed by all application subscribers." formula="Σ size(t) × freq(t) × sub_count(t)" />
         <StatCountCard label="System Size" value={`${data.summary.node_count ?? 0} Nodes, ${data.summary.topic_count ?? 0} Topics`} description="Total number of physical nodes and topics in the system topology." formula="count(nodes + topics)" />
         <StatCountCard label="Load Variation (CV)" value={`${Number(data.summary.cv ?? 0).toFixed(1)}%`} description="Coefficient of variation of node bandwidth. High CV means uneven network load distribution." formula="std(bw) / mean(bw) × 100" />
-        <StatCountCard label="Zero-BW Nodes" value={data.summary.zero_bw_nodes ?? 0} description="Nodes with no network traffic, potentially indicating orphaned infrastructure." formula="count(bw = 0)" />
-        <StatCountCard label="Outliers" value={data.summary.outlier_count ?? 0} description="Nodes whose total bandwidth exceeds the IQR upper fence." formula="bw > Q3 + 1.5 × IQR" />
+        <DrillableCountCard
+          label="Zero-BW Nodes"
+          value={data.summary.zero_bw_nodes ?? 0}
+          description="Nodes with no network traffic, potentially indicating orphaned infrastructure."
+          formula="count(bw = 0)"
+          onClick={() => setDrill({ title: "Zero-Bandwidth Nodes", columns: ["Outbound", "Inbound", "Total"], rows: zeroBwNodeItems })}
+        />
+        <DrillableCountCard
+          label="Outliers"
+          value={data.summary.outlier_count ?? 0}
+          description="Nodes whose total bandwidth exceeds the IQR upper fence."
+          formula="bw > Q3 + 1.5 × IQR"
+          onClick={() => setDrill({ title: "Bandwidth Outlier Nodes", columns: ["Outbound", "Inbound", "Total"], rows: outlierBwNodeItems })}
+        />
         </div>
       </div>
       <Card className="bg-background pb-3">
@@ -1889,6 +2390,8 @@ function NetworkUsageSection({ data }: { data: ExtrasStats["network_usage"] }) {
           rows={data.outliers.map(([label, out, inn, tot]) => [label, fmtBytes(out), fmtBytes(inn), fmtBytes(tot)])}
         />
       )}
+
+      {drill && <DrillDownModal config={drill} onClose={() => setDrill(null)} />}
     </div>
   )
 }
